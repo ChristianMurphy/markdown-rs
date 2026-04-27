@@ -1,5 +1,28 @@
-use markdown::{mdast, message, to_html, to_html_with_options, to_mdast, Options};
+use markdown::{mdast, message, to_html, to_html_with_options, to_mdast, Options, ParseOptions};
 use pretty_assertions::assert_eq;
+
+/// Walk an mdast subtree and assert that every parent node's recorded
+/// position fully envelops every positioned child's recorded position.
+/// Returns `Err((parent_kind, parent_end, child_kind, child_end))` on the
+/// first violation; `Ok(())` if the whole subtree is well-formed.
+fn assert_position_envelop(node: &mdast::Node) -> Result<(), (String, usize, String, usize)> {
+    fn kind(n: &mdast::Node) -> String {
+        let s = format!("{:?}", n);
+        s.split(['(', ' ', '{']).next().unwrap_or(&s).to_string()
+    }
+    let parent_pos = node.position().cloned();
+    if let Some(children) = node.children() {
+        for child in children {
+            if let (Some(p), Some(c)) = (parent_pos.as_ref(), child.position()) {
+                if c.end.offset > p.end.offset || c.start.offset < p.start.offset {
+                    return Err((kind(node), p.end.offset, kind(child), c.end.offset));
+                }
+            }
+            assert_position_envelop(child)?;
+        }
+    }
+    Ok(())
+}
 
 #[test]
 fn fuzz() -> Result<(), message::Message> {
@@ -127,6 +150,18 @@ fn fuzz() -> Result<(), message::Message> {
         ),
         Ok("<p>&lt;</p>".to_string()),
         "12: mdx: handle invalid mdx without panic (GH-26)"
+    );
+
+    let bullet = to_mdast("- ```\n\nx\n", &ParseOptions::default())?;
+    assert!(
+        assert_position_envelop(&bullet).is_ok(),
+        "13: bullet list with unclosed fenced code and trailing paragraph: list-item position must envelop fenced-code child"
+    );
+
+    let ordered = to_mdast("1. ```\n\nx\n", &ParseOptions::default())?;
+    assert!(
+        assert_position_envelop(&ordered).is_ok(),
+        "14: ordered list with unclosed fenced code and trailing paragraph: list-item position must envelop fenced-code child"
     );
 
     Ok(())
