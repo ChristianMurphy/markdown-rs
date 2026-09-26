@@ -37,6 +37,7 @@ extern crate alloc;
 mod configuration;
 mod construct;
 mod event;
+pub mod extension;
 mod parser;
 mod resolve;
 mod state;
@@ -57,7 +58,10 @@ pub use util::character_reference::{decode_named, decode_numeric};
 pub use util::identifier::{id_cont, id_start};
 
 #[doc(hidden)]
-pub use util::sanitize_uri::sanitize;
+pub use util::sanitize_uri::{normalize as normalize_uri, sanitize, sanitize_with_protocols};
+
+#[doc(hidden)]
+pub use util::constant::{SAFE_PROTOCOL_HREF, SAFE_PROTOCOL_SRC};
 
 #[doc(hidden)]
 pub use util::location::Location;
@@ -159,6 +163,11 @@ pub fn to_html_with_options(value: &str, options: &Options) -> Result<String, me
 /// ```
 pub fn to_mdast(value: &str, options: &ParseOptions) -> Result<mdast::Node, message::Message> {
     let (events, parse_state) = parser::parse(value, options)?;
-    let node = to_mdast::compile(&events, parse_state.bytes)?;
+    let node = to_mdast::compile(
+        &events,
+        parse_state.bytes,
+        &options.text_constructs,
+        &parse_state.extension_names.borrow(),
+    )?;
     Ok(node)
 }

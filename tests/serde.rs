@@ -719,6 +719,43 @@ fn serde_paragraph() -> Result<(), Error> {
     )
 }
 
+#[test]
+#[cfg(feature = "serde")]
+fn serde_custom() -> Result<(), Error> {
+    use markdown::mdast::{Custom, Text};
+    use pretty_assertions::assert_eq;
+
+    let node = Node::Custom(Custom {
+        name: "wikiLink".into(),
+        attributes: vec![("target".into(), "a b".into())].into_iter().collect(),
+        value: None,
+        children: vec![Node::Text(Text {
+            value: "c".into(),
+            position: None,
+        })],
+        position: None,
+    });
+    let expected: serde_json::Value = serde_json::from_str(
+        r#"{
+  "type": "custom",
+  "name": "wikiLink",
+  "attributes": {"target": "a b"},
+  "children": [{"type": "text", "value": "c"}]
+}"#,
+    )
+    .map_err(Error::Serde)?;
+    let actual = serde_json::to_value(&node).map_err(Error::Serde)?;
+
+    assert_eq!(actual, expected, "should serialize attributes as an object");
+    assert_eq!(
+        node,
+        serde_json::from_value(actual).map_err(Error::Serde)?,
+        "should deserialize"
+    );
+
+    Ok(())
+}
+
 /// Assert serde of mdast constructs.
 ///
 /// Refer below links for the mdast JSON construct types.

@@ -1,0 +1,14 @@
+[package]
+description = "Prototype: unified-style plugin processor for markdown-rs (mdast → hast → html)"
+edition = "2018"
+license = "MIT"
+name = "markdown_processor"
+publish = false
+rust-version = "1.56"
+version = "0.0.0"
+
+[dependencies]
+markdown = { path = "../" }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

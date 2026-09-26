@@ -1,0 +1,15 @@
+[package]
+description = "Prototype: wiki links (`[[Page|alias]]`) as a markdown_processor syntax plugin"
+edition = "2018"
+license = "MIT"
+name = "wiki_link"
+publish = false
+rust-version = "1.56"
+version = "0.0.0"
+
+[dependencies]
+markdown = { path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

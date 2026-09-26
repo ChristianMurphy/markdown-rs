@@ -1,6 +1,7 @@
 //! Turn events into a syntax tree.
 
 use crate::event::{Event, Kind, Name};
+use crate::extension::{collect_tokens, is_extension, TextConstruct};
 use crate::mdast::{
     AttributeContent, AttributeValue, AttributeValueExpression, Blockquote, Break, Code,
     Definition, Delete, Emphasis, FootnoteDefinition, FootnoteReference, Heading, Html, Image,
@@ -83,7 +84,6 @@ impl Reference {
 
 /// Context used to compile markdown.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug)]
 struct CompileContext<'a> {
     // Static info.
     /// List of events.
@@ -103,13 +103,24 @@ struct CompileContext<'a> {
     // Intermediate results.
     /// Primary tree and buffers.
     trees: Vec<(Node, Vec<usize>, Vec<usize>)>,
+    /// Plugin constructs, by index.
+    constructs: &'a [Box<dyn TextConstruct>],
+    /// Names of plugin construct tokens, by interned index.
+    extension_names: &'a [&'static str],
+    /// Index of the last event of the current plugin construct match.
+    extension_end: Option<usize>,
     /// Current event index.
     index: usize,
 }
 
 impl<'a> CompileContext<'a> {
     /// Create a new compile context.
-    fn new(events: &'a [Event], bytes: &'a [u8]) -> CompileContext<'a> {
+    fn new(
+        events: &'a [Event],
+        bytes: &'a [u8],
+        constructs: &'a [Box<dyn TextConstruct>],
+        extension_names: &'a [&'static str],
+    ) -> CompileContext<'a> {
         let tree = Node::Root(Root {
             children: vec![],
             position: Some(Position {
@@ -138,6 +149,9 @@ impl<'a> CompileContext<'a> {
             media_reference_stack: vec![],
             raw_flow_fence_seen: false,
             trees: vec![(tree, vec![], vec![])],
+            constructs,
+            extension_names,
+            extension_end: None,
             index: 0,
         }
     }
@@ -225,8 +239,13 @@ impl<'a> CompileContext<'a> {
 }
 
 /// Turn events and bytes into a syntax tree.
-pub fn compile(events: &[Event], bytes: &[u8]) -> Result<Node, message::Message> {
-    let mut context = CompileContext::new(events, bytes);
+pub fn compile(
+    events: &[Event],
+    bytes: &[u8],
+    constructs: &[Box<dyn TextConstruct>],
+    extension_names: &[&'static str],
+) -> Result<Node, message::Message> {
+    let mut context = CompileContext::new(events, bytes, constructs, extension_names);
 
     let mut index = 0;
     while index < events.len() {
@@ -260,6 +279,13 @@ fn handle(context: &mut CompileContext, index: usize) -> Result<(), message::Mes
 
 /// Handle [`Enter`][Kind::Enter].
 fn enter(context: &mut CompileContext) -> Result<(), message::Message> {
+    if is_extension(&context.events[context.index].name) {
+        if context.extension_end.is_none() {
+            on_enter_extension(context);
+        }
+        return Ok(());
+    }
+
     match context.events[context.index].name {
         Name::AutolinkEmail
         | Name::AutolinkProtocol
@@ -338,6 +364,13 @@ fn enter(context: &mut CompileContext) -> Result<(), message::Message> {
 
 /// Handle [`Exit`][Kind::Exit].
 fn exit(context: &mut CompileContext) -> Result<(), message::Message> {
+    if is_extension(&context.events[context.index].name) {
+        if context.extension_end == Some(context.index) {
+            context.extension_end = None;
+        }
+        return Ok(());
+    }
+
     match context.events[context.index].name {
         Name::Autolink
         | Name::BlockQuote
@@ -1712,6 +1745,38 @@ fn position_from_event(event: &Event) -> Position {
         start: end.clone(),
         end,
     }
+}
+
+/// Handle [`Enter`][Kind::Enter]:[`Extension`][Name::Extension], first of a
+/// match.
+///
+/// Lets the construct make one node of the match, which is added as a child.
+fn on_enter_extension(context: &mut CompileContext) {
+    let index = match context.events[context.index].name {
+        Name::Extension(index, _) => index,
+        _ => unreachable!("expected a construct to start with a token"),
+    };
+    let (tokens, end) = collect_tokens(
+        context.events,
+        context.bytes,
+        context.extension_names,
+        context.index,
+    );
+    let mut node = context.constructs[usize::from(index)].to_mdast(&tokens);
+
+    if node.position().is_none() {
+        node.position_set(Some(Position {
+            start: context.events[context.index].point.to_unist(),
+            end: context.events[end].point.to_unist(),
+        }));
+    }
+
+    context
+        .tail_mut()
+        .children_mut()
+        .expect("expected a parent for a construct")
+        .push(node);
+    context.extension_end = Some(end);
 }
 
 /// Resolve the current stack on the tree.

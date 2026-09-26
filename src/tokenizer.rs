@@ -242,7 +242,21 @@ pub struct TokenizeState<'a> {
     /// Secondary marker.
     pub marker_b: u8,
     /// Several markers.
-    pub markers: &'static [u8],
+    pub markers: &'a [u8],
+    /// Plugin construct tokens to reopen after a line ending.
+    pub extension_reopen: Vec<(u16, bool)>,
+    /// Number of events when the current plugin construct started.
+    pub extension_events: usize,
+    /// Where the current plugin construct started.
+    pub extension_start: usize,
+    /// Steps the current plugin construct took without consuming.
+    pub extension_retries: u16,
+    /// Plugin construct being tried.
+    pub extension_index: u8,
+    /// State of the plugin construct being tried.
+    pub extension_state: u16,
+    /// Plugin construct to try next at the current byte.
+    pub extension_next: u8,
     /// Whether something was seen.
     pub seen: bool,
     /// Size.
@@ -358,6 +372,13 @@ impl<'a> Tokenizer<'a> {
                 marker: 0,
                 marker_b: 0,
                 markers: &[],
+                extension_reopen: vec![],
+                extension_start: 0,
+                extension_events: 0,
+                extension_retries: 0,
+                extension_index: 0,
+                extension_state: 0,
+                extension_next: 0,
                 labels: vec![],
                 seen: false,
                 size: 0,
@@ -659,7 +680,7 @@ impl<'a> Tokenizer<'a> {
 }
 
 /// Move back past ignored bytes.
-fn move_point_back(tokenizer: &mut Tokenizer, point: &mut Point) {
+pub fn move_point_back(tokenizer: &Tokenizer, point: &mut Point) {
     while point.index > 0 {
         point.index -= 1;
         let action = byte_action(tokenizer.parse_state.bytes, point);

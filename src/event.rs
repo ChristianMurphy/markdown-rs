@@ -6,6 +6,12 @@ use crate::util::constant::TAB_SIZE;
 /// Semantic label of a span.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Name {
+    /// Token of a plugin construct: construct index and interned name.
+    Extension(u8, u16),
+    /// Rest of a plugin construct token after a line ending.
+    ExtensionContinuation(u8, u16),
+    /// Line ending in a plugin construct.
+    ExtensionLineEnding(u8),
     /// Attention sequence.
     ///
     /// > 👉 **Note**: this is used while parsing but compiled away.

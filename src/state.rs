@@ -43,6 +43,11 @@ impl State {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 pub enum Name {
+    /// Text: try the next plugin construct.
+    TextBeforeConstruct,
+    /// Plugin text construct.
+    TextConstruct,
+
     AttentionStart,
     AttentionInside,
 
@@ -472,6 +477,8 @@ pub enum Name {
 /// Call the corresponding state for a state name.
 pub fn call(tokenizer: &mut Tokenizer, name: Name) -> State {
     let func = match name {
+        Name::TextBeforeConstruct => construct::text::before_construct_next,
+        Name::TextConstruct => crate::extension::step,
         Name::AttentionStart => construct::attention::start,
         Name::AttentionInside => construct::attention::inside,
 

@@ -99,7 +99,7 @@ pub fn sanitize_with_protocols(value: &str, protocols: &[&str]) -> String {
 ///
 /// [definition]: crate::construct::definition
 /// [label_end]: crate::construct::label_end
-fn normalize(value: &str) -> String {
+pub fn normalize(value: &str) -> String {
     let chars = value.chars().collect::<Vec<_>>();
     // Note: it’ll grow bigger for each non-ascii or non-safe character.
     let mut result = String::with_capacity(value.len());

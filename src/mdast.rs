@@ -4,6 +4,7 @@
 
 use crate::unist::Position;
 use alloc::{
+    collections::BTreeMap,
     fmt,
     string::{String, ToString},
     vec::Vec,
@@ -253,6 +254,10 @@ pub enum Node {
     Definition(Definition),
     /// Paragraph.
     Paragraph(Paragraph),
+
+    // Plugins.
+    /// Custom node, made by a plugin.
+    Custom(Custom),
 }
 
 impl fmt::Debug for Node {
@@ -293,6 +298,7 @@ impl fmt::Debug for Node {
             Node::ListItem(x) => x.fmt(f),
             Node::Definition(x) => x.fmt(f),
             Node::Paragraph(x) => x.fmt(f),
+            Node::Custom(x) => x.fmt(f),
         }
     }
 }
@@ -324,6 +330,10 @@ impl ToString for Node {
             Node::TableCell(x) => children_to_string(&x.children),
             Node::ListItem(x) => children_to_string(&x.children),
             Node::Paragraph(x) => children_to_string(&x.children),
+            Node::Custom(x) => x
+                .value
+                .clone()
+                .unwrap_or_else(|| children_to_string(&x.children)),
 
             // Literals.
             Node::MdxjsEsm(x) => x.value.clone(),
@@ -356,6 +366,7 @@ impl Node {
             // Parent.
             Node::Root(x) => Some(&x.children),
             Node::Paragraph(x) => Some(&x.children),
+            Node::Custom(x) => Some(&x.children),
             Node::Heading(x) => Some(&x.children),
             Node::Blockquote(x) => Some(&x.children),
             Node::List(x) => Some(&x.children),
@@ -381,6 +392,7 @@ impl Node {
             // Parent.
             Node::Root(x) => Some(&mut x.children),
             Node::Paragraph(x) => Some(&mut x.children),
+            Node::Custom(x) => Some(&mut x.children),
             Node::Heading(x) => Some(&mut x.children),
             Node::Blockquote(x) => Some(&mut x.children),
             Node::List(x) => Some(&mut x.children),
@@ -438,6 +450,7 @@ impl Node {
             Node::ListItem(x) => x.position.as_ref(),
             Node::Definition(x) => x.position.as_ref(),
             Node::Paragraph(x) => x.position.as_ref(),
+            Node::Custom(x) => x.position.as_ref(),
         }
     }
 
@@ -477,6 +490,7 @@ impl Node {
             Node::ListItem(x) => x.position.as_mut(),
             Node::Definition(x) => x.position.as_mut(),
             Node::Paragraph(x) => x.position.as_mut(),
+            Node::Custom(x) => x.position.as_mut(),
         }
     }
 
@@ -516,6 +530,7 @@ impl Node {
             Node::ListItem(x) => x.position = position,
             Node::Definition(x) => x.position = position,
             Node::Paragraph(x) => x.position = position,
+            Node::Custom(x) => x.position = position,
         }
     }
 }
@@ -591,6 +606,33 @@ pub enum AttributeValue {
 pub struct Root {
     // Parent.
     /// Content model.
+    pub children: Vec<Node>,
+    /// Positional info.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub position: Option<Position>,
+}
+
+/// Custom node, made by a plugin, such as a wiki link.
+///
+/// Plugin fields are strings, so the node stays serializable.
+///
+/// ```markdown
+/// > | [[a]]
+///     ^^^^^
+/// ```
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Custom {
+    /// Node name, such as `wikiLink`.
+    pub name: String,
+    /// Fields set by the plugin.
+    pub attributes: BTreeMap<String, String>,
+    // Literal.
+    /// Content model, for nodes with a value.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub value: Option<String>,
+    // Parent.
+    /// Content model, for nodes with children.
     pub children: Vec<Node>,
     /// Positional info.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
@@ -2340,6 +2382,60 @@ mod tests {
             format!("{:?}", node),
             "MdxJsxTextElement { children: [], position: Some(1:1-1:2 (0-1)), name: None, attributes: [] }",
             "should support `position_set`"
+        );
+    }
+
+    // Plugins.
+
+    #[test]
+    fn custom() {
+        let mut node = Node::Custom(Custom {
+            name: "a".into(),
+            children: vec![Node::Text(Text {
+                value: "b".into(),
+                position: None,
+            })],
+            ..Custom::default()
+        });
+
+        assert_eq!(
+            format!("{:?}", node),
+            "Custom { name: \"a\", attributes: {}, value: None, children: [Text { value: \"b\", position: None }], position: None }",
+            "should support `Debug`"
+        );
+        assert_eq!(
+            node.to_string(),
+            "b",
+            "should support `ToString` of children"
+        );
+        assert_eq!(
+            node.children().map(Vec::len),
+            Some(1),
+            "should support `children`"
+        );
+        assert_eq!(
+            node.children_mut().map(|children| children.len()),
+            Some(1),
+            "should support `children_mut`"
+        );
+        assert_eq!(node.position(), None, "should support `position`");
+        assert_eq!(node.position_mut(), None, "should support `position_mut`");
+        node.position_set(Some(Position::new(1, 1, 0, 1, 2, 1)));
+        assert_eq!(
+            node.position(),
+            Some(&Position::new(1, 1, 0, 1, 2, 1)),
+            "should support `position_set`"
+        );
+
+        let literal = Node::Custom(Custom {
+            name: "a".into(),
+            value: Some("c".into()),
+            ..Custom::default()
+        });
+        assert_eq!(
+            literal.to_string(),
+            "c",
+            "should support `ToString` of a value"
         );
     }
 }

@@ -1,5 +1,6 @@
 //! Turn events into a string of HTML.
 use crate::event::{Event, Kind, Name};
+use crate::extension::is_extension;
 use crate::mdast::AlignKind;
 use crate::util::{
     character_reference::decode as decode_character_reference,
@@ -129,6 +130,10 @@ struct CompileContext<'a> {
     buffers: Vec<String>,
     /// Current event index.
     index: usize,
+    /// Depth of plugin construct tokens: only the outermost are written.
+    extension_depth: usize,
+    /// Index of the enter event of the outermost open plugin construct token.
+    extension_enter: usize,
 }
 
 impl<'a> CompileContext<'a> {
@@ -164,6 +169,8 @@ impl<'a> CompileContext<'a> {
             line_ending_default: line_ending,
             buffers: vec![String::new()],
             index: 0,
+            extension_depth: 0,
+            extension_enter: 0,
             options,
         }
     }
@@ -311,6 +318,14 @@ fn handle(context: &mut CompileContext, index: usize) {
 
 /// Handle [`Enter`][Kind::Enter].
 fn enter(context: &mut CompileContext) {
+    if is_extension(&context.events[context.index].name) {
+        if context.extension_depth == 0 {
+            context.extension_enter = context.index;
+        }
+        context.extension_depth += 1;
+        return;
+    }
+
     match context.events[context.index].name {
         Name::CodeFencedFenceInfo
         | Name::CodeFencedFenceMeta
@@ -362,6 +377,22 @@ fn enter(context: &mut CompileContext) {
 
 /// Handle [`Exit`][Kind::Exit].
 fn exit(context: &mut CompileContext) {
+    // Plugin constructs are written as text.
+    if is_extension(&context.events[context.index].name) {
+        context.extension_depth -= 1;
+        if context.extension_depth == 0 {
+            let value = Slice::from_position(
+                context.bytes,
+                &Position {
+                    start: &context.events[context.extension_enter].point,
+                    end: &context.events[context.index].point,
+                },
+            );
+            context.push(&encode(value.as_str(), context.encode_html));
+        }
+        return;
+    }
+
     match context.events[context.index].name {
         Name::CodeFencedFenceMeta
         | Name::MathFlowFenceMeta

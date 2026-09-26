@@ -1,6 +1,8 @@
 //! Turn bytes of markdown into events.
 
+use crate::construct::text::MARKERS as TEXT_MARKERS;
 use crate::event::{Event, Point};
+use crate::extension::text_markers;
 use crate::message;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::subtokenize;
@@ -8,6 +10,7 @@ use crate::tokenizer::Tokenizer;
 use crate::util::location::Location;
 use crate::ParseOptions;
 use alloc::{string::String, vec, vec::Vec};
+use core::cell::RefCell;
 
 /// Info needed, in all content types, when parsing markdown.
 ///
@@ -25,6 +28,10 @@ pub struct ParseState<'a> {
     pub definitions: Vec<String>,
     /// Set of defined GFM footnote definition identifiers.
     pub gfm_footnote_definitions: Vec<String>,
+    /// Bytes that can start something in text, including plugin constructs.
+    pub text_markers: Vec<u8>,
+    /// Names of plugin construct tokens: events refer to them by index.
+    pub extension_names: RefCell<Vec<&'static str>>,
 }
 
 /// Turn a string of markdown into events.
@@ -46,6 +53,8 @@ pub fn parse<'a>(
         },
         definitions: vec![],
         gfm_footnote_definitions: vec![],
+        text_markers: text_markers(&TEXT_MARKERS, &options.text_constructs),
+        extension_names: RefCell::new(vec![]),
     };
 
     let start = Point {

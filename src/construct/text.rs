@@ -30,9 +30,10 @@ use crate::resolve::Name as ResolveName;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::Subresult;
 use crate::tokenizer::Tokenizer;
+use core::convert::TryFrom;
 
 /// Characters that can start something in text.
-const MARKERS: [u8; 16] = [
+pub const MARKERS: [u8; 16] = [
     b'!',  // `label_start_image`
     b'$',  // `raw_text` (math (text))
     b'&',  // `character_reference`
@@ -62,7 +63,12 @@ const MARKERS: [u8; 16] = [
 ///     ^
 /// ```
 pub fn start(tokenizer: &mut Tokenizer) -> State {
-    tokenizer.tokenize_state.markers = &MARKERS;
+    let parse_state = tokenizer.parse_state;
+    tokenizer.tokenize_state.markers = if parse_state.text_markers.is_empty() {
+        &MARKERS
+    } else {
+        &parse_state.text_markers
+    };
     tokenizer.attempt(
         State::Next(StateName::TextBefore),
         State::Next(StateName::TextBefore),
@@ -77,6 +83,60 @@ pub fn start(tokenizer: &mut Tokenizer) -> State {
 ///     ^
 /// ```
 pub fn before(tokenizer: &mut Tokenizer) -> State {
+    if tokenizer.parse_state.options.text_constructs.is_empty() {
+        before_builtin(tokenizer)
+    } else {
+        before_construct(tokenizer, 0)
+    }
+}
+
+/// Before plugin constructs, trying the one at `index` and later.
+///
+/// ```markdown
+/// > | [[a]]
+///     ^
+/// ```
+pub fn before_construct(tokenizer: &mut Tokenizer, index: u8) -> State {
+    let constructs = &tokenizer.parse_state.options.text_constructs;
+    let mut index = usize::from(index);
+
+    if let Some(byte) = tokenizer.current {
+        while index < constructs.len() {
+            if byte != b'\n' && constructs[index].markers().contains(&byte) {
+                let next =
+                    u8::try_from(index + 1).expect("expected fewer than 256 text constructs");
+                tokenizer.tokenize_state.extension_next = next;
+                tokenizer.attempt(
+                    State::Next(StateName::TextBefore),
+                    State::Next(StateName::TextBeforeConstruct),
+                );
+                return crate::extension::start(tokenizer, next - 1);
+            }
+            index += 1;
+        }
+    }
+
+    before_builtin(tokenizer)
+}
+
+/// Before plugin constructs, after one did not match.
+///
+/// ```markdown
+/// > | [[a]
+///     ^
+/// ```
+pub fn before_construct_next(tokenizer: &mut Tokenizer) -> State {
+    let next = tokenizer.tokenize_state.extension_next;
+    before_construct(tokenizer, next)
+}
+
+/// Before built-in constructs.
+///
+/// ```markdown
+/// > | abc
+///     ^
+/// ```
+pub fn before_builtin(tokenizer: &mut Tokenizer) -> State {
     match tokenizer.current {
         None => {
             tokenizer.register_resolver(ResolveName::Data);
