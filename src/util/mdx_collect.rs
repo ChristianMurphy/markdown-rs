@@ -110,7 +110,7 @@ pub fn charge_parse_budget(tokenizer: &Tokenizer, len: usize, place: &Point) -> 
         budget.set(left);
         None
     } else {
-        Some(State::Error(message::Message {
+        Some(State::error(message::Message {
             place: Some(Box::new(message::Place::Point(place.to_unist()))),
             reason: "Unexpected MDX expression or ESM that needs more parsing than `mdx_parse_budget_factor` allows".into(),
             rule_id: Box::new("mdx-parse-budget".into()),

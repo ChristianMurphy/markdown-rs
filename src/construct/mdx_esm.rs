@@ -215,7 +215,7 @@ fn parse_esm(tokenizer: &mut Tokenizer) -> State {
             let point = Location::new(tokenizer.parse_state.bytes)
                 .relative_to_point(&result.stops, relative)
                 .expect("expected non-empty string");
-            State::Error(message::Message {
+            State::error(message::Message {
                 place: Some(Box::new(message::Place::Point(point))),
                 reason: message,
                 source,
@@ -224,7 +224,7 @@ fn parse_esm(tokenizer: &mut Tokenizer) -> State {
         }
         MdxSignal::Eof(message, source, rule_id) => {
             if tokenizer.current.is_none() {
-                State::Error(message::Message {
+                State::error(message::Message {
                     place: Some(Box::new(message::Place::Point(tokenizer.point.to_unist()))),
                     reason: message,
                     source,

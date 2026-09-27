@@ -715,7 +715,7 @@ impl<'a> Tokenizer<'a> {
         // Always capture (and restore) when checking.
         // No need to capture (and restore) when `nok` is `State::Nok`, because the
         // parent attempt will do it.
-        let progress = if nok == State::Nok {
+        let progress = if matches!(nok, State::Nok) {
             None
         } else {
             Some(self.capture())
@@ -819,7 +819,7 @@ fn push_impl(
             State::Error(_) => break,
             State::Ok | State::Nok => {
                 if let Some(attempt) = tokenizer.attempts.pop() {
-                    if attempt.kind == AttemptKind::Check || state == State::Nok {
+                    if attempt.kind == AttemptKind::Check || matches!(state, State::Nok) {
                         if let Some(progress) = attempt.progress {
                             tokenizer.free(progress);
                         }
@@ -827,7 +827,7 @@ fn push_impl(
 
                     tokenizer.consumed = true;
 
-                    let next = if state == State::Ok {
+                    let next = if matches!(state, State::Ok) {
                         attempt.ok
                     } else {
                         attempt.nok
