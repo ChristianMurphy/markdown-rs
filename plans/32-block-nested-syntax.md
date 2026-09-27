@@ -308,7 +308,7 @@ This follows micromark's `attentionMarkers` and GFM strikethrough:
 - Boxing `Custom` (question 20) shrinks `mdast::Node` to 152 bytes but slows `to_mdast` by up to 0.13%, so it was reverted too.
 - `mdast::Node` stays 176 bytes against 152 on 1.0.0, because `Custom`, now the largest variant, has `fields`.
 - The performance session’s differential found no difference from 1.0.0 over 1,001,467 inputs in 7 option sets.
-- With one codegen unit, the same bins measure +0.26% to +0.98%. The default profile’s partitioning alone moves counts by about 1.5% (D45).
+- With one codegen unit and rustc 1.98.1, the same bins measure +0.34% to +0.94%. The default profile’s partitioning alone moves counts by about 1.5% (D45, D46).
 - The review fixes (D44) cost up to 0.10 points on the small and `readme.md` documents, and nothing on the tiny document:
   - The `divide_events` loop costs about 1,150 instructions on small `to_html`. Two other loop shapes measured worse, by 311 and 1,382.
   - The list item lookback in `to_html` costs 523 on small `to_html` and 3,470 on `readme.md`. Returning early without plugin tokens saved 152 and 1,111 of that; `#[inline]` on the helpers cost more.
@@ -332,6 +332,22 @@ This follows micromark's `attentionMarkers` and GFM strikethrough:
   - `is_in_content` holds the check that both compilers, `content::resolve`, and `util::skip` repeated.
   - Chunks off the stack, rather than closing an open chunk before each attempt. Closing it made an attempt that continued content open a second chunk, which the success check counted as a token left open.
 - Revisit if plugin authors want a broken rule reported instead of a silently failed attempt.
+
+### D46. The 1% gate on short documents
+
+- Question: in the performance session’s harness, GFM `to_html` on short documents costs +1.02% over 1.0.0, above the gate of about 1%. Should that change the code?
+- Evidence, with both sides built in one run on one compiler:
+  - My three documents measure +0.34% to +0.94%, and the 652 spec examples +0.71% to +0.91%.
+  - A profile of GFM `to_html` over the spec examples shows no hot spot. About two thirds of the extra is in parsing, from the extension design: the `extension` field in every event, nested documents, and attention-construct lookups. The rest is the per-event plugin check in `to_html`.
+  - Layout noise from changing one function is 0.2 to 0.6 points, more than the 0.02-point overshoot.
+- Alternatives:
+  - Accept and document, chosen.
+  - One plugin check per event in `to_html`: up to 0.21 points better on documents, and up to 0.63 points worse on spec examples.
+  - `#[inline]` on `attention_construct`: up to 0.10 points better on the documents, but up to 0.77 points worse on the spec examples.
+  - A harness that averages over code layout, before judging any lever: more work, and not needed for this decision.
+- The stable toolchain changed from rustc 1.95 to 1.98.1 during this work. Comparisons need both sides built in the same run, on one toolchain.
+- Revisit if: a lever helps on every bin by more than the layout noise, or a harness that averages over layout makes smaller differences measurable.
+- Transcript: questions 21 and 22.
 
 ### Nearby finding: fenced code at the end of a list item
 
@@ -383,6 +399,10 @@ This follows micromark's `attentionMarkers` and GFM strikethrough:
    Answer: Measure it on a spike (Recommended).
 20. Node size: "mdast::Node is 176 bytes against 152 on 1.0.0 … How should that be handled?"
    Answer: Measure boxing Custom (Recommended).
+21. The 1% gate: "One bin crosses your ~1% gate for short documents: GFM to_html on short documents … at +1.02%. … What should happen?"
+   Answer: Profile, then decide (Recommended).
+22. After profiling: "… The cost is spread across the extension design, with no hot spot. Both candidate fixes are inconsistent … What now?"
+   Answer: Accept and document (Recommended).
 
 ## Assumptions (override at approval)
 
@@ -440,6 +460,7 @@ A nested text region in a text construct: a test construct `{{…}}` whose insid
 
 ## Progress log
 
+- D46: GFM `to_html` on short documents at +1.02% was profiled and accepted. Both levers were inconsistent across bins, and layout noise exceeds the overshoot. The findings doc now shows rustc 1.98.1 numbers from one run.
 - Stabilize, part 3: review fixes (D44), in three sub-agent rounds, the last with no critical findings. Content chunks stay off the tokenizer stack, and the facade tracks the last chunk. Verified: fmt, clippy, 98 test binaries, `no_std` builds of all seven crates, fuzzing, and callgrind bins (D43).
 - Stabilize, part 2: the performance pass (D43), with the fieldless `Name` kept and boxed `Custom` measured and reverted. Verified again: fmt, clippy (only the pre-existing `util/char.rs` warning), 98 test binaries, and `no_std` builds of all seven crates.
 - Stabilize, part 1: spike code removed, 34 facade tests and plugin tests added (D42), clippy fixed without suppressions, and the facade state boxed (D43). Mutation checks show the tests catch the core fixes. fmt, clippy, all 98 test binaries, and `no_std` builds pass.

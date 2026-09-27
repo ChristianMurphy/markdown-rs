@@ -12,7 +12,7 @@ A prototype on branch `feat/plugin-prototypes` shows that both kinds of plugin w
 - Tree transforms: plugins edit mdast (the markdown syntax tree) or hast (the HTML syntax tree) before the HTML is written.
 - Syntax extensions: a plugin adds a construct that runs as a state machine inside markdown-rs's own tokenizer, like a micromark construct. Constructs can be inline, block, or container syntax, and can have markdown inside them.
 
-With no plugins registered, markdown-rs costs +0.26% to +0.98% instructions against 1.0.0.
+With no plugins registered, markdown-rs costs +0.28% to +1.02% instructions against 1.0.0.
 
 Five plugins exercise the design. Each is its own crate that uses only public APIs:
 - `gfm_alert` turns GitHub alert block quotes (`> [!NOTE]`) into alert boxes. It is a transform plugin.
@@ -172,7 +172,7 @@ In all 7 remaining examples, the mdast from `to_mdast` is already wrong:
 
 ### Instruction counts
 
-Callgrind counted instructions inside one call, in builds with one codegen unit: with the default profile, partitioning alone moves counts by about 1.5%. Wall-clock benchmarks were discarded, because the machine's load average was about 15 on 12 cores.
+Callgrind counted instructions inside one call, in builds with one codegen unit: with the default profile, partitioning alone moves counts by about 1.5%. Both sides were built in the same run, with rustc 1.98.1. Even so, a change to one function moves the counts of others by 0.2 to 0.6 points, so smaller differences are layout noise. Wall-clock benchmarks were discarded, because the machine's load average was about 15 on 12 cores.
 
 The documents:
 - tiny: 13 bytes.
@@ -183,14 +183,16 @@ With no plugins registered, against 1.0.0:
 
 | Document | Function | 1.0.0 | Prototype |
 | --- | --- | --- | --- |
-| tiny | `to_html` | 98,776 | +0.95% |
-| tiny | `to_mdast` | 102,769 | +0.46% |
-| small | `to_html` | 1,606,442 | +0.79% |
-| small | `to_mdast` | 1,653,437 | +0.56% |
-| `readme.md` | `to_html` | 17,629,499 | +0.54% |
-| `readme.md` | `to_mdast` | 17,967,845 | +0.26% |
+| tiny | `to_html` | 101,687 | +0.94% |
+| tiny | `to_mdast` | 105,598 | +0.56% |
+| small | `to_html` | 1,676,595 | +0.74% |
+| small | `to_mdast` | 1,722,393 | +0.56% |
+| `readme.md` | `to_html` | 18,234,582 | +0.56% |
+| `readme.md` | `to_mdast` | 18,561,075 | +0.34% |
 
-The table shows CommonMark options. GFM options give +0.41% to +0.98%.
+The table shows CommonMark options. GFM options give +0.47% to +0.93%.
+
+The parse-speed harness from #227 measured 671 short and 192 medium documents in 7 option sets: +0.28% to +1.02%. Only GFM `to_html` on short documents goes above 1%, by less than the layout noise.
 
 The first version cost +7% to +15%. These changes brought it down:
 
