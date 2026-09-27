@@ -528,17 +528,11 @@ impl<'a> Tokenizer<'a> {
     /// Consume the current byte and following bytes up to one in `stop`, which
     /// must include `\n`, `\r`, and `\t`.
     pub fn consume_run(&mut self, stop: &ByteSet) {
-        debug_assert!(
-            stop[usize::from(b'\n')] && stop[usize::from(b'\r')] && stop[usize::from(b'\t')]
-        );
+        debug_assert!(stop.contains(b'\n') && stop.contains(b'\r') && stop.contains(b'\t'));
         self.consume();
         let bytes = self.parse_state.bytes;
         let start = self.point.index;
-        let mut index = start;
-
-        while index < self.push_end && !stop[usize::from(bytes[index])] {
-            index += 1;
-        }
+        let index = start + find(&bytes[start..self.push_end], stop);
 
         if index > start {
             self.point.index = index;
@@ -892,20 +886,122 @@ fn push_impl(
     state
 }
 
-/// Set of bytes, as a table.
-pub type ByteSet = [bool; 256];
+/// Set of ASCII bytes: a table, and nibble tables to find one of them in 16
+/// bytes at once.
+#[derive(Debug)]
+pub struct ByteSet {
+    table: [bool; 256],
+    /// Per low nibble: a bit per high nibble of the bytes in the set.
+    low: [u8; 16],
+    /// Per high nibble: its bit, or `0` for non-ASCII.
+    high: [u8; 16],
+}
+
+impl ByteSet {
+    /// Whether `byte` is in the set.
+    pub fn contains(&self, byte: u8) -> bool {
+        self.table[usize::from(byte)]
+    }
+}
 
 /// Bytes that move differently than others: runs stop at them.
-pub const LINE_STOP: ByteSet = with_bytes([false; 256], b"\n\r\t");
+pub const LINE_STOP: ByteSet = with_bytes(
+    ByteSet {
+        table: [false; 256],
+        low: [0; 16],
+        high: [0; 16],
+    },
+    b"\n\r\t",
+);
 
 /// `set` with `bytes` added.
-pub const fn with_bytes(mut set: ByteSet, bytes: &[u8]) -> ByteSet {
+///
+/// A non-ASCII byte does not compile: `1 << high` overflows.
+pub const fn with_bytes(set: ByteSet, bytes: &[u8]) -> ByteSet {
+    let mut set = set;
     let mut index = 0;
     while index < bytes.len() {
-        set[bytes[index] as usize] = true;
+        let byte = bytes[index];
+        let high = byte >> 4;
+        set.table[byte as usize] = true;
+        set.high[high as usize] = 1 << high;
+        set.low[(byte & 15) as usize] |= 1 << high;
         index += 1;
     }
     set
+}
+
+/// Offset of the first byte of `bytes` in `stop`, or `bytes.len()`.
+fn find(bytes: &[u8], stop: &ByteSet) -> usize {
+    #[cfg(feature = "wide")]
+    {
+        use wide::u8x16;
+        let low = u8x16::new(stop.low);
+        let high = u8x16::new(stop.high);
+        let mut offset = 0;
+
+        while offset + 16 <= bytes.len() {
+            let mut chunk = [0; 16];
+            chunk.copy_from_slice(&bytes[offset..offset + 16]);
+            let chunk = u8x16::new(chunk);
+            let hits = low.shuffle(chunk & u8x16::splat(15))
+                & high.shuffle(chunk.unbounded_shr_scalar(4) & u8x16::splat(15));
+            let misses = hits.simd_eq(u8x16::splat(0)).to_bitmask();
+            if misses != 0xFFFF {
+                return offset + (!misses).trailing_zeros() as usize;
+            }
+            offset += 16;
+        }
+
+        offset
+            + bytes[offset..]
+                .iter()
+                .position(|byte| stop.contains(*byte))
+                .unwrap_or(bytes.len() - offset)
+    }
+    #[cfg(all(feature = "fearless_simd", not(feature = "wide")))]
+    {
+        let level = fearless_simd::Level::baseline();
+        fearless_simd::dispatch!(level, simd => find_simd(simd, bytes, stop))
+    }
+    #[cfg(not(any(feature = "wide", feature = "fearless_simd")))]
+    bytes
+        .iter()
+        .position(|byte| stop.contains(*byte))
+        .unwrap_or(bytes.len())
+}
+
+/// Same as `find`, with `fearless_simd`.
+#[cfg(all(feature = "fearless_simd", not(feature = "wide")))]
+#[inline(always)]
+fn find_simd<S: fearless_simd::Simd>(simd: S, bytes: &[u8], stop: &ByteSet) -> usize {
+    use fearless_simd::{u8x16, SimdInto};
+    let low: u8x16<S> = stop.low.simd_into(simd);
+    let high: u8x16<S> = stop.high.simd_into(simd);
+    let fifteen = simd.splat_u8x16(15);
+    let zero = simd.splat_u8x16(0);
+    let mut offset = 0;
+
+    while offset + 16 <= bytes.len() {
+        let mut chunk = [0; 16];
+        chunk.copy_from_slice(&bytes[offset..offset + 16]);
+        let chunk: u8x16<S> = chunk.simd_into(simd);
+        let hits = simd.and_u8x16(
+            simd.swizzle_dyn_u8x16(low, simd.and_u8x16(chunk, fifteen)),
+            simd.swizzle_dyn_u8x16(high, simd.shr_u8x16(chunk, 4)),
+        );
+        let misses = simd.to_bitmask_mask8x16(simd.simd_eq_u8x16(hits, zero));
+        if misses != 0xFFFF {
+            return offset + (!misses).trailing_zeros() as usize;
+        }
+        offset += 16;
+    }
+
+    offset
+        + bytes[offset..]
+            .iter()
+            .position(|byte| stop.contains(*byte))
+            .unwrap_or(bytes.len() - offset)
 }
 
 /// Figure out how to handle a byte.
@@ -953,6 +1049,38 @@ fn byte_action(bytes: &[u8], point: &Point) -> ByteAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_find() {
+        let sets = [
+            &LINE_STOP,
+            &with_bytes(LINE_STOP, b"!$&*<[\\]_`{~HWhw"),
+            &with_bytes(LINE_STOP, b" \\|"),
+        ];
+        let alphabet = b"\n\r\t !$&*<HW[\\]_`hw{|~a0\x7f\x80\x8a\xa1\xff";
+        let mut seed: u64 = 1;
+        let mut bytes = vec![];
+
+        for _ in 0..10_000 {
+            bytes.clear();
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let len = (seed >> 33) as usize % 70;
+            for _ in 0..len {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                // Mostly plain letters, so runs are long.
+                let pick = (seed >> 33) as usize % (alphabet.len() * 8);
+                bytes.push(*alphabet.get(pick).unwrap_or(&b'a'));
+            }
+
+            for set in sets {
+                let expected = bytes
+                    .iter()
+                    .position(|byte| set.contains(*byte))
+                    .unwrap_or(bytes.len());
+                assert_eq!(find(&bytes, set), expected, "{:?}", bytes);
+            }
+        }
+    }
 
     #[test]
     fn test_tokenizer_size() {

@@ -4,11 +4,15 @@ name = "bench"
 path = "benches/bench.rs"
 
 [dependencies]
+# Needs Rust 1.89.
+fearless_simd = { version = "1.0.0", default-features = false, features = ["libm"], optional = true }
 log = { optional = true, version = "0.4" }
 # Needs Rust 1.61.
 memchr = { default-features = false, optional = true, version = "2.7" }
 serde = { features = ["derive"], optional = true, version = "1" }
 unicode-id = { features = ["no_std"], version = "0.3" }
+# Needs Rust 1.89.
+wide = { version = "1.7.1", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -27,6 +31,8 @@ default = []
 json = ["serde"]
 log = ["dep:log"]
 memchr = ["dep:memchr"]
+wide = ["dep:wide"]
+fearless_simd = ["dep:fearless_simd"]
 serde = ["dep:serde"]
 
 [package]

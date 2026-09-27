@@ -11,6 +11,8 @@ markdown-baseline = { package = "markdown", version = "=1.0.0" }
 
 [features]
 memchr = ["markdown/memchr"]
+wide = ["markdown/wide"]
+fearless_simd = ["markdown/fearless_simd"]
 
 [dev-dependencies]
 criterion = "0.5"

@@ -75,7 +75,7 @@ pub fn inside(tokenizer: &mut Tokenizer) -> State {
 
 /// Whether `byte` may start a construct here (text can start more than string).
 fn is_marker(tokenizer: &Tokenizer, byte: u8) -> bool {
-    tokenizer.tokenize_state.markers[usize::from(byte)] && text::may_start(tokenizer, byte)
+    tokenizer.tokenize_state.markers.contains(byte) && text::may_start(tokenizer, byte)
 }
 
 /// Merge adjacent data events.
