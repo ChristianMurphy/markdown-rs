@@ -112,3 +112,20 @@ fn turns_wiki_links_inside_links_into_text() {
         "should not nest links in references"
     );
 }
+
+#[test]
+fn parses_the_alias_as_markdown() {
+    let processor =
+        markdown_processor::Processor::new().plugin(wiki_link::WikiLinks::new("/wiki/"));
+
+    assert_eq!(
+        processor.process("[[a|*b* c]]").unwrap(),
+        "<p><a href=\"/wiki/a\"><em>b</em> c</a></p>",
+        "should parse markdown in an alias"
+    );
+    assert_eq!(
+        processor.process("[[a| ]]").unwrap(),
+        "<p><a href=\"/wiki/a\">a</a></p>",
+        "should use the target for a whitespace-only alias"
+    );
+}

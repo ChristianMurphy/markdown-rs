@@ -46,7 +46,16 @@ pub enum Name {
     /// Text: try the next plugin construct.
     TextBeforeConstruct,
     /// Plugin text construct.
-    TextConstruct,
+    FlowBeforeConstruct,
+    ExtensionStep,
+    ExtensionNonLazy,
+    ExtensionLazy,
+    ExtensionAttemptOk,
+    ExtensionAttemptNok,
+    ExtensionIndentAfter,
+    ExtensionContinuation,
+    DocumentContainerNewBeforeConstruct,
+    DocumentStartNested,
 
     AttentionStart,
     AttentionInside,
@@ -478,7 +487,18 @@ pub enum Name {
 pub fn call(tokenizer: &mut Tokenizer, name: Name) -> State {
     let func = match name {
         Name::TextBeforeConstruct => construct::text::before_construct_next,
-        Name::TextConstruct => crate::extension::step,
+        Name::FlowBeforeConstruct => construct::flow::before_construct_next,
+        Name::ExtensionStep => crate::extension::step,
+        Name::ExtensionNonLazy => crate::extension::at_non_lazy,
+        Name::ExtensionLazy => crate::extension::at_lazy,
+        Name::ExtensionAttemptOk => crate::extension::attempt_ok,
+        Name::ExtensionAttemptNok => crate::extension::attempt_nok,
+        Name::ExtensionIndentAfter => crate::extension::indent_after,
+        Name::ExtensionContinuation => crate::extension::continuation,
+        Name::DocumentContainerNewBeforeConstruct => {
+            construct::document::container_new_before_construct_next
+        }
+        Name::DocumentStartNested => construct::document::start_nested,
         Name::AttentionStart => construct::attention::start,
         Name::AttentionInside => construct::attention::inside,
 

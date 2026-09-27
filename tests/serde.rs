@@ -727,7 +727,8 @@ fn serde_custom() -> Result<(), Error> {
 
     let node = Node::Custom(Custom {
         name: "wikiLink".into(),
-        attributes: vec![("target".into(), "a b".into())].into_iter().collect(),
+        fields: vec![("target".into(), "a b".into())].into_iter().collect(),
+        attributes: vec![("class".into(), "c".into())].into_iter().collect(),
         value: None,
         children: vec![Node::Text(Text {
             value: "c".into(),
@@ -739,14 +740,18 @@ fn serde_custom() -> Result<(), Error> {
         r#"{
   "type": "custom",
   "name": "wikiLink",
-  "attributes": {"target": "a b"},
+  "fields": {"target": "a b"},
+  "attributes": {"class": "c"},
   "children": [{"type": "text", "value": "c"}]
 }"#,
     )
     .map_err(Error::Serde)?;
     let actual = serde_json::to_value(&node).map_err(Error::Serde)?;
 
-    assert_eq!(actual, expected, "should serialize attributes as an object");
+    assert_eq!(
+        actual, expected,
+        "should serialize fields and attributes as objects"
+    );
     assert_eq!(
         node,
         serde_json::from_value(actual).map_err(Error::Serde)?,

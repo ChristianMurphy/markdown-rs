@@ -24,6 +24,7 @@
 use crate::event::Name;
 use crate::state::{Name as StateName, State};
 use crate::tokenizer::Tokenizer;
+use core::convert::TryFrom;
 
 /// Start of flow.
 //
@@ -36,6 +37,52 @@ use crate::tokenizer::Tokenizer;
 ///     ^
 /// ```
 pub fn start(tokenizer: &mut Tokenizer) -> State {
+    if tokenizer.parse_state.options.flow_constructs.is_empty() {
+        start_builtin(tokenizer)
+    } else {
+        before_construct(tokenizer, 0)
+    }
+}
+
+/// Before plugin constructs, trying the one at `index` and later.
+pub fn before_construct(tokenizer: &mut Tokenizer, index: u8) -> State {
+    let options = tokenizer.parse_state.options;
+    let mut index = usize::from(index);
+
+    if let Some(byte) = tokenizer.current {
+        while index < options.flow_constructs.len() {
+            // After indentation, which the construct skips first, a marker
+            // is checked there.
+            if matches!(byte, b'\t' | b' ')
+                || (byte != b'\n'
+                    && options.flow_constructs[index].markers().contains(&byte)
+                    && options.flow_constructs[index].previous(tokenizer.previous))
+            {
+                crate::extension::ext_mut(tokenizer).next =
+                    u8::try_from(index + 1).expect("expected fewer than 256 flow constructs");
+                tokenizer.attempt(
+                    State::Next(StateName::FlowAfter),
+                    State::Next(StateName::FlowBeforeConstruct),
+                );
+                let global = u8::try_from(options.text_constructs.len() + index)
+                    .expect("expected fewer than 256 constructs");
+                return crate::extension::start(tokenizer, global);
+            }
+            index += 1;
+        }
+    }
+
+    start_builtin(tokenizer)
+}
+
+/// Before plugin constructs, after one did not match.
+pub fn before_construct_next(tokenizer: &mut Tokenizer) -> State {
+    let next = crate::extension::ext(tokenizer).next;
+    before_construct(tokenizer, next)
+}
+
+/// Start of flow, at built-in constructs.
+pub fn start_builtin(tokenizer: &mut Tokenizer) -> State {
     match tokenizer.current {
         Some(b'#') => {
             tokenizer.attempt(

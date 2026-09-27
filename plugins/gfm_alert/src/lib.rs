@@ -47,7 +47,7 @@ impl Plugin for GfmAlert {
 
         processor.add_hast_handler(NAME, |node, children| {
             // Other plugins can make these nodes too.
-            let kind = node.attributes.get("kind").map_or("", String::as_str);
+            let kind = node.fields.get("kind").map_or("", String::as_str);
             let (kind, title) = KINDS
                 .iter()
                 .copied()
@@ -128,7 +128,7 @@ fn to_alert(node: &mut mdast::Node) -> Option<mdast::Node> {
 
     Some(mdast::Node::Custom(mdast::Custom {
         name: NAME.into(),
-        attributes: vec![("kind".into(), kind)].into_iter().collect(),
+        fields: vec![("kind".into(), kind)].into_iter().collect(),
         children: core::mem::take(&mut quote.children),
         position: quote.position.clone(),
         ..mdast::Custom::default()

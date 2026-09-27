@@ -1,6 +1,7 @@
 //! Move across lists of events.
 
 use crate::event::{Event, Kind, Name};
+use crate::extension::{is_in_content, TokenKind};
 
 /// Skip from `index`, optionally past `names`.
 pub fn opt(events: &[Event], index: usize, names: &[Name]) -> usize {
@@ -10,6 +11,50 @@ pub fn opt(events: &[Event], index: usize, names: &[Name]) -> usize {
 /// Skip from `index`, optionally past `names`, backwards.
 pub fn opt_back(events: &[Event], index: usize, names: &[Name]) -> usize {
     skip_opt_impl(events, index, names, false)
+}
+
+/// Like [`opt`], also past plugin tokens in content, such as the prefixes
+/// of plugin containers.
+pub fn opt_with_extensions(
+    events: &[Event],
+    index: usize,
+    names: &[Name],
+    extension_names: &[(u8, &'static str, TokenKind)],
+) -> usize {
+    skip_opt_with_extensions(events, index, names, extension_names, true)
+}
+
+/// Like [`opt_back`], also past plugin tokens in content.
+pub fn opt_back_with_extensions(
+    events: &[Event],
+    index: usize,
+    names: &[Name],
+    extension_names: &[(u8, &'static str, TokenKind)],
+) -> usize {
+    skip_opt_with_extensions(events, index, names, extension_names, false)
+}
+
+fn skip_opt_with_extensions(
+    events: &[Event],
+    mut index: usize,
+    names: &[Name],
+    extension_names: &[(u8, &'static str, TokenKind)],
+    forward: bool,
+) -> usize {
+    if extension_names.is_empty() {
+        return skip_opt_impl(events, index, names, forward);
+    }
+
+    let open = if forward { Kind::Enter } else { Kind::Exit };
+    loop {
+        index = skip_opt_impl(events, index, names, forward);
+        match events.get(index) {
+            Some(event) if event.kind == open && is_in_content(extension_names, event) => {
+                index = skip_opt_impl(events, index, core::slice::from_ref(&event.name), forward);
+            }
+            _ => return index,
+        }
+    }
 }
 
 /// Skip from `index` forwards to `names`.

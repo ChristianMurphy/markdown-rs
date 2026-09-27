@@ -76,7 +76,8 @@
 //! [html-strong]: https://html.spec.whatwg.org/multipage/text-level-semantics.html#the-strong-element
 //! [html-del]: https://html.spec.whatwg.org/multipage/edits.html#the-del-element
 
-use crate::event::{Event, Kind, Name, Point};
+use crate::event::{Content, Event, Kind, Name, Point};
+use crate::extension::{attention_construct, intern, TokenKind};
 use crate::resolve::Name as ResolveName;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::Subresult;
@@ -200,6 +201,18 @@ pub fn resolve(tokenizer: &mut Tokenizer) -> Option<Subresult> {
                         continue;
                     }
 
+                    // For plugin delimiter runs: the same size, one the
+                    // construct allows.
+                    if let Some((_, construct)) =
+                        attention_construct(tokenizer.parse_state.options, sequence_close.marker)
+                    {
+                        if sequence_close.size != sequence_open.size
+                            || !construct.attention_sizes().contains(&sequence_close.size)
+                        {
+                            continue;
+                        }
+                    }
+
                     // We found a match!
                     next_index = match_sequences(tokenizer, &mut sequences, open, close);
 
@@ -229,6 +242,16 @@ fn get_sequences(tokenizer: &mut Tokenizer) -> Vec<Sequence> {
     let mut index = 0;
     let mut stack = vec![];
     let mut sequences = vec![];
+    let options = tokenizer.parse_state.options;
+    // Other markers `*` and `_` can be used around, like micromark’s
+    // `attentionMarkers`.
+    let is_other_marker = |char: Option<char>| {
+        matches!(char, Some('*' | '_'))
+            || (options.constructs.gfm_strikethrough && char == Some('~'))
+            || char.map_or(false, |char| {
+                char.is_ascii() && attention_construct(options, char as u8).is_some()
+            })
+    };
 
     while index < tokenizer.events.len() {
         let enter = &tokenizer.events[index];
@@ -243,18 +266,15 @@ fn get_sequences(tokenizer: &mut Tokenizer) -> Vec<Sequence> {
                 let before = classify_opt(before_char);
                 let after_char = char_after_index(tokenizer.parse_state.bytes, exit.point.index);
                 let after = classify_opt(after_char);
+                // For regular attention markers (not strikethrough or plugin
+                // runs), the other attention markers can be used around them.
+                let is_regular = matches!(marker, b'*' | b'_');
                 let open = after == CharacterKind::Other
                     || (after == CharacterKind::Punctuation && before != CharacterKind::Other)
-                    // For regular attention markers (not strikethrough), the
-                    // other attention markers can be used around them
-                    || (marker != b'~' && matches!(after_char, Some('*' | '_')))
-                    || (marker != b'~' && tokenizer.parse_state.options.constructs.gfm_strikethrough && matches!(after_char, Some('~')));
+                    || (is_regular && is_other_marker(after_char));
                 let close = before == CharacterKind::Other
                     || (before == CharacterKind::Punctuation && after != CharacterKind::Other)
-                    || (marker != b'~' && matches!(before_char, Some('*' | '_')))
-                    || (marker != b'~'
-                        && tokenizer.parse_state.options.constructs.gfm_strikethrough
-                        && matches!(before_char, Some('~')));
+                    || (is_regular && is_other_marker(before_char));
 
                 sequences.push(Sequence {
                     index,
@@ -301,8 +321,12 @@ fn match_sequences(
     // It’s changed if sequences are removed.
     let mut next = close;
 
-    // Number of markers to use from the sequence.
-    let take = if sequences[open].size > 1 && sequences[close].size > 1 {
+    let plugin = attention_construct(tokenizer.parse_state.options, sequences[open].marker);
+
+    // Number of markers to use from the sequence: a plugin run pairs whole.
+    let take = if plugin.is_some() {
+        sequences[close].size
+    } else if sequences[open].size > 1 && sequences[close].size > 1 {
         2
     } else {
         1
@@ -327,7 +351,21 @@ fn match_sequences(
         between += 1;
     }
 
-    let (group_name, seq_name, text_name) = if sequences[open].marker == b'~' {
+    // Plugin runs have `Extension` names, told apart by interned ids.
+    let (group_id, seq_id, text_id) = if let Some((index, _)) = plugin {
+        let id =
+            |name, kind| intern(tokenizer, index, name, kind).expect("expected fewer token names");
+        (
+            id("attention", TokenKind::Token),
+            id("attentionSequence", TokenKind::Token),
+            id("attentionText", TokenKind::Content(Content::Text)),
+        )
+    } else {
+        (0, 0, 0)
+    };
+    let (group_name, seq_name, text_name) = if plugin.is_some() {
+        (Name::Extension, Name::Extension, Name::Extension)
+    } else if sequences[open].marker == b'~' {
         (
             Name::GfmStrikethrough,
             Name::GfmStrikethroughSequence,
@@ -362,24 +400,28 @@ fn match_sequences(
                 name: group_name.clone(),
                 point: sequences[open].end_point.clone(),
                 link: None,
+                extension: group_id,
             },
             Event {
                 kind: Kind::Enter,
                 name: seq_name.clone(),
                 point: sequences[open].end_point.clone(),
                 link: None,
+                extension: seq_id,
             },
             Event {
                 kind: Kind::Exit,
                 name: seq_name.clone(),
                 point: open_exit.clone(),
                 link: None,
+                extension: seq_id,
             },
             Event {
                 kind: Kind::Enter,
                 name: text_name.clone(),
                 point: open_exit,
                 link: None,
+                extension: text_id,
             },
         ],
     );
@@ -393,24 +435,28 @@ fn match_sequences(
                 name: text_name,
                 point: close_enter.clone(),
                 link: None,
+                extension: text_id,
             },
             Event {
                 kind: Kind::Enter,
                 name: seq_name.clone(),
                 point: close_enter,
                 link: None,
+                extension: seq_id,
             },
             Event {
                 kind: Kind::Exit,
                 name: seq_name,
                 point: sequences[close].start_point.clone(),
                 link: None,
+                extension: seq_id,
             },
             Event {
                 kind: Kind::Exit,
                 name: group_name,
                 point: sequences[close].start_point.clone(),
                 link: None,
+                extension: group_id,
             },
         ],
     );

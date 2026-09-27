@@ -36,6 +36,9 @@ pub enum Container {
     ListItem,
     /// [GFM: Footnote definition][crate::construct::gfm_footnote_definition].
     GfmFootnoteDefinition,
+    /// Plugin container: construct index, and interned names of its open
+    /// token and its content token.
+    Extension(u8, u16, u16),
 }
 
 /// Info used to tokenize a container.
@@ -243,20 +246,8 @@ pub struct TokenizeState<'a> {
     pub marker_b: u8,
     /// Several markers.
     pub markers: &'a [u8],
-    /// Plugin construct tokens to reopen after a line ending.
-    pub extension_reopen: Vec<(u16, bool)>,
-    /// Number of events when the current plugin construct started.
-    pub extension_events: usize,
-    /// Where the current plugin construct started.
-    pub extension_start: usize,
-    /// Steps the current plugin construct took without consuming.
-    pub extension_retries: u16,
-    /// Plugin construct being tried.
-    pub extension_index: u8,
-    /// State of the plugin construct being tried.
-    pub extension_state: u16,
-    /// Plugin construct to try next at the current byte.
-    pub extension_next: u8,
+    /// State of plugin constructs, created when one runs.
+    pub extension: Option<Box<crate::extension::ExtensionState>>,
     /// Whether something was seen.
     pub seen: bool,
     /// Size.
@@ -292,7 +283,7 @@ pub struct Tokenizer<'a> {
     // First line where this tokenizer starts.
     first_line: usize,
     /// Current point after the last line ending (excluding jump).
-    line_start: Point,
+    pub line_start: Point,
     /// Track whether the current byte is already consumed (`true`) or expected
     /// to be consumed (`false`).
     ///
@@ -372,13 +363,7 @@ impl<'a> Tokenizer<'a> {
                 marker: 0,
                 marker_b: 0,
                 markers: &[],
-                extension_reopen: vec![],
-                extension_start: 0,
-                extension_events: 0,
-                extension_retries: 0,
-                extension_index: 0,
-                extension_state: 0,
-                extension_next: 0,
+                extension: None,
                 labels: vec![],
                 seen: false,
                 size: 0,
@@ -446,12 +431,24 @@ impl<'a> Tokenizer<'a> {
         self.account_for_potential_skip();
     }
 
+    /// Define a jump for the line of `point`, unless one is defined: for a
+    /// chunk that continues on the line of the previous one.
+    pub fn define_skip_if_missing(&mut self, point: Point) {
+        if point.line - self.first_line >= self.column_start.len() {
+            self.define_skip(point);
+        }
+    }
+
     /// Increment the current positional info if we’re right after a line
     /// ending, which has a skip defined.
     fn account_for_potential_skip(&mut self) {
         let at = self.point.line - self.first_line;
 
-        if self.point.column == 1 && at != self.column_start.len() {
+        // A tokenizer can start mid line, in a nested document.
+        let is_line_start = self.point.column == 1
+            || (self.point.index == self.line_start.index && self.point.vs == self.line_start.vs);
+
+        if is_line_start && at != self.column_start.len() {
             self.move_to(self.column_start[at]);
         }
     }
@@ -544,6 +541,7 @@ impl<'a> Tokenizer<'a> {
 
         debug_assert!(
             current != previous.name
+                || previous.kind == Kind::Exit
                 || previous.point.index != point.index
                 || previous.point.vs != point.vs,
             "expected non-empty event"
@@ -572,6 +570,7 @@ impl<'a> Tokenizer<'a> {
             name,
             point,
             link: None,
+            extension: 0,
         };
         self.events.push(event);
     }
@@ -705,6 +704,7 @@ fn enter_impl(tokenizer: &mut Tokenizer, name: Name, link: Option<Link>) {
         name,
         point,
         link,
+        extension: 0,
     });
 }
 

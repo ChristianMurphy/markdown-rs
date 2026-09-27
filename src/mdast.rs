@@ -625,7 +625,13 @@ pub struct Root {
 pub struct Custom {
     /// Node name, such as `wikiLink`.
     pub name: String,
-    /// Fields set by the plugin.
+    /// Properties of the node, such as the target of a wiki link.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub fields: BTreeMap<String, String>,
+    /// Attributes, such as `{#id .class key=value}` of a directive.
     pub attributes: BTreeMap<String, String>,
     // Literal.
     /// Content model, for nodes with a value.
@@ -2400,7 +2406,7 @@ mod tests {
 
         assert_eq!(
             format!("{:?}", node),
-            "Custom { name: \"a\", attributes: {}, value: None, children: [Text { value: \"b\", position: None }], position: None }",
+            "Custom { name: \"a\", fields: {}, attributes: {}, value: None, children: [Text { value: \"b\", position: None }], position: None }",
             "should support `Debug`"
         );
         assert_eq!(

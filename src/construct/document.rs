@@ -16,6 +16,7 @@ use crate::subtokenize::divide_events;
 use crate::tokenizer::{Container, ContainerState, Tokenizer};
 use crate::util::skip;
 use alloc::{boxed::Box, vec::Vec};
+use core::convert::TryFrom;
 
 /// Phases where we can exit containers.
 #[derive(Debug, PartialEq)]
@@ -68,6 +69,15 @@ pub fn start(tokenizer: &mut Tokenizer) -> State {
     State::Retry(StateName::BomStart)
 }
 
+/// Start of a document inside a plugin construct: no BOM or frontmatter.
+pub fn start_nested(tokenizer: &mut Tokenizer) -> State {
+    tokenizer.tokenize_state.document_child = Some(Box::new(Tokenizer::new(
+        tokenizer.point.clone(),
+        tokenizer.parse_state,
+    )));
+    State::Retry(StateName::DocumentContainerNewBefore)
+}
+
 /// At optional frontmatter.
 ///
 /// ```markdown
@@ -103,6 +113,7 @@ pub fn container_existing_before(tokenizer: &mut Tokenizer) -> State {
             Container::BlockQuote => StateName::BlockQuoteContStart,
             Container::GfmFootnoteDefinition => StateName::GfmFootnoteDefinitionContStart,
             Container::ListItem => StateName::ListItemContStart,
+            Container::Extension(..) => StateName::ExtensionContinuation,
         };
 
         tokenizer.attempt(
@@ -173,6 +184,61 @@ pub fn container_new_before(tokenizer: &mut Tokenizer) -> State {
         .document_container_stack
         .swap(tokenizer.tokenize_state.document_continued, tail);
 
+    if tokenizer.parse_state.options.document_constructs.is_empty() {
+        container_new_before_block_quote(tokenizer)
+    } else {
+        container_new_before_construct(tokenizer, 0)
+    }
+}
+
+/// Before plugin containers, trying the one at `index` and later.
+pub fn container_new_before_construct(tokenizer: &mut Tokenizer, index: u8) -> State {
+    let options = tokenizer.parse_state.options;
+    let mut index = usize::from(index);
+
+    if let Some(byte) = tokenizer.current {
+        while index < options.document_constructs.len() {
+            let construct = &options.document_constructs[index];
+            // After indentation, which the construct skips first, a marker is
+            // checked there.
+            if matches!(byte, b'\t' | b' ')
+                || (byte != b'\n'
+                    && construct.markers().contains(&byte)
+                    && construct.previous(tokenizer.previous))
+            {
+                let global = u8::try_from(
+                    options.text_constructs.len() + options.flow_constructs.len() + index,
+                )
+                .expect("expected fewer than 256 constructs");
+                tokenizer.tokenize_state.document_container_stack
+                    [tokenizer.tokenize_state.document_continued]
+                    .kind = Container::Extension(global, 0, 0);
+                crate::extension::ext_mut(tokenizer).next =
+                    u8::try_from(index + 1).expect("expected fewer than 256 containers");
+                tokenizer.attempt(
+                    State::Next(StateName::DocumentContainerNewAfter),
+                    State::Next(StateName::DocumentContainerNewBeforeConstruct),
+                );
+                return crate::extension::start(tokenizer, global);
+            }
+            index += 1;
+        }
+    }
+
+    container_new_before_block_quote(tokenizer)
+}
+
+/// Before plugin containers, after one did not match.
+pub fn container_new_before_construct_next(tokenizer: &mut Tokenizer) -> State {
+    let next = crate::extension::ext(tokenizer).next;
+    container_new_before_construct(tokenizer, next)
+}
+
+/// Before a block quote.
+pub fn container_new_before_block_quote(tokenizer: &mut Tokenizer) -> State {
+    tokenizer.tokenize_state.document_container_stack
+        [tokenizer.tokenize_state.document_continued]
+        .kind = Container::BlockQuote;
     tokenizer.attempt(
         State::Next(StateName::DocumentContainerNewAfter),
         State::Next(StateName::DocumentContainerNewBeforeNotBlockQuote),
@@ -367,9 +433,16 @@ pub fn flow_end(tokenizer: &mut Tokenizer) -> State {
 
     tokenizer.tokenize_state.document_exits.push(None);
 
+    // In a nested document, the next line’s prefix may already be
+    // skipped: stop right after the line ending.
+    let end = if tokenizer.current.is_some() {
+        &tokenizer.line_start
+    } else {
+        &tokenizer.point
+    };
     let state = child.push(
         (child.point.index, child.point.vs),
-        (tokenizer.point.index, tokenizer.point.vs),
+        (end.index, end.vs),
         state,
     );
 
@@ -491,33 +564,41 @@ fn exit_containers(tokenizer: &mut Tokenizer, phase: &Phase) -> Result<(), messa
         let mut exits = Vec::with_capacity(stack_close.len());
 
         while let Some(container) = stack_close.pop() {
-            let name = match container.kind {
-                Container::BlockQuote => Name::BlockQuote,
-                Container::GfmFootnoteDefinition => Name::GfmFootnoteDefinition,
-                Container::ListItem => Name::ListItem,
+            // Names, with the interned names of plugin tokens.
+            let names = match container.kind {
+                Container::BlockQuote => ((Name::BlockQuote, 0), None),
+                Container::GfmFootnoteDefinition => ((Name::GfmFootnoteDefinition, 0), None),
+                Container::ListItem => ((Name::ListItem, 0), None),
+                // Content token, then open token.
+                Container::Extension(_, open, content) => {
+                    ((Name::Extension, content), Some((Name::Extension, open)))
+                }
             };
 
-            exits.push(Event {
-                kind: Kind::Exit,
-                name: name.clone(),
-                point: tokenizer.point.clone(),
-                link: None,
-            });
+            for (name, extension) in core::iter::once(names.0).chain(names.1) {
+                exits.push(Event {
+                    kind: Kind::Exit,
+                    name: name.clone(),
+                    point: tokenizer.point.clone(),
+                    link: None,
+                    extension,
+                });
 
-            let mut stack_index = tokenizer.stack.len();
-            let mut found = false;
+                let mut stack_index = tokenizer.stack.len();
+                let mut found = false;
 
-            while stack_index > 0 {
-                stack_index -= 1;
+                while stack_index > 0 {
+                    stack_index -= 1;
 
-                if tokenizer.stack[stack_index] == name {
-                    tokenizer.stack.remove(stack_index);
-                    found = true;
-                    break;
+                    if tokenizer.stack[stack_index] == name {
+                        tokenizer.stack.remove(stack_index);
+                        found = true;
+                        break;
+                    }
                 }
-            }
 
-            debug_assert!(found, "expected to find container event to exit");
+                debug_assert!(found, "expected to find container event to exit");
+            }
         }
 
         debug_assert!(

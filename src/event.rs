@@ -6,12 +6,10 @@ use crate::util::constant::TAB_SIZE;
 /// Semantic label of a span.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Name {
-    /// Token of a plugin construct: construct index and interned name.
-    Extension(u8, u16),
-    /// Rest of a plugin construct token after a line ending.
-    ExtensionContinuation(u8, u16),
-    /// Line ending in a plugin construct.
-    ExtensionLineEnding(u8),
+    /// Token of a plugin construct: which one is in [`Event::extension`].
+    Extension,
+    /// Linked chunk of markdown inside a plugin construct.
+    ExtensionChunk,
     /// Attention sequence.
     ///
     /// > 👉 **Note**: this is used while parsing but compiled away.
@@ -3387,8 +3385,9 @@ pub enum Name {
 }
 
 /// List of void events, used to make sure everything is working well.
-pub const VOID_EVENTS: [Name; 76] = [
+pub const VOID_EVENTS: [Name; 77] = [
     Name::AttentionSequence,
+    Name::ExtensionChunk,
     Name::AutolinkEmail,
     Name::AutolinkMarker,
     Name::AutolinkProtocol,
@@ -3469,6 +3468,8 @@ pub const VOID_EVENTS: [Name; 76] = [
 /// Embedded content type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Content {
+    /// Represents a nested [document][crate::construct::document].
+    Document,
     /// Represents [flow content][crate::construct::flow].
     Flow,
     /// Represents [content][crate::construct::content].
@@ -3573,4 +3574,7 @@ pub struct Event {
     pub point: Point,
     /// Link to another event.
     pub link: Option<Link>,
+    /// Interned name of the token of a plugin construct, for
+    /// [`Extension`][Name::Extension].
+    pub extension: u16,
 }

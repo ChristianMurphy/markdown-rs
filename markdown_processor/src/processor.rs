@@ -6,7 +6,7 @@ use crate::{
     mdast_util_to_hast::{mdast_util_to_hast_with_handlers, Handlers},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
-use markdown::{extension::TextConstruct, mdast, message::Message, to_mdast, ParseOptions};
+use markdown::{extension::Construct, mdast, message::Message, to_mdast, ParseOptions};
 
 /// A plugin: attaches parser config, transforms, and handlers to a processor.
 pub trait Plugin {
@@ -56,7 +56,7 @@ impl Processor {
 
     /// Add a construct to text, tried before the built-in constructs at its
     /// markers, in the order added.
-    pub fn add_syntax(&mut self, construct: impl TextConstruct + 'static) {
+    pub fn add_syntax(&mut self, construct: impl Construct + 'static) {
         self.parse.text_constructs.push(Box::new(construct));
     }
 

@@ -161,7 +161,7 @@ fn treats_unknown_kind_from_other_plugins_as_note() {
                 if let Some(children) = tree.children_mut() {
                     children.push(mdast::Node::Custom(mdast::Custom {
                         name: "gfmAlert".into(),
-                        attributes: vec![("kind".into(), "é".into())].into_iter().collect(),
+                        fields: vec![("kind".into(), "é".into())].into_iter().collect(),
                         ..mdast::Custom::default()
                     }));
                 }

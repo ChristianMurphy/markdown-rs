@@ -15,9 +15,10 @@ use alloc::{
     format,
     string::{String, ToString},
     vec,
+    vec::Vec,
 };
 use markdown::{
-    extension::{ConstructTokenizer, Step, TextConstruct, Token},
+    extension::{Construct, ConstructTokenizer, ContentType, Step, Token},
     mdast, normalize_uri,
 };
 use markdown_processor::{hast, visit::visit_mut, Plugin, Processor};
@@ -48,7 +49,7 @@ impl Plugin for WikiLinks {
 
         let base = self.base;
         processor.add_hast_handler(NAME, move |node, children| {
-            let target = node.attributes.get("target").map_or("", String::as_str);
+            let target = node.fields.get("target").map_or("", String::as_str);
             vec![hast::Node::Element(hast::Element {
                 tag_name: "a".into(),
                 properties: vec![(
@@ -104,7 +105,7 @@ const CLOSE_SECOND: u16 = 7;
 /// The syntax: `[[`, a target, optionally `|` and an alias, then `]]`, on one line.
 struct WikiLinkSyntax;
 
-impl TextConstruct for WikiLinkSyntax {
+impl Construct for WikiLinkSyntax {
     fn markers(&self) -> &[u8] {
         b"["
     }
@@ -145,7 +146,7 @@ impl TextConstruct for WikiLinkSyntax {
             }
             (ALIAS_START, Some(b']')) => Step::Retry(CLOSE),
             (ALIAS_START, Some(byte)) if is_part_byte(byte) => {
-                t.enter("wikiLinkAlias");
+                t.enter_content("wikiLinkAlias", ContentType::Text);
                 Step::Retry(ALIAS)
             }
             (ALIAS, Some(b']')) => {
@@ -171,22 +172,33 @@ impl TextConstruct for WikiLinkSyntax {
         }
     }
 
-    fn to_mdast(&self, tokens: &[Token]) -> mdast::Node {
-        let find = |name: &str| tokens.iter().find(|token| token.name == name);
-        let target = find("wikiLinkTarget").expect("expected target");
-        let label = find("wikiLinkAlias")
-            .filter(|alias| !alias.value.trim().is_empty())
-            .unwrap_or(target);
-        let mut attributes = BTreeMap::new();
-        attributes.insert("target".into(), target.value.clone().into_owned());
+    fn to_mdast(&self, tokens: Vec<Token>) -> mdast::Node {
+        let mut target = None;
+        let mut children = vec![];
+        for token in tokens {
+            match token.name {
+                "wikiLinkTarget" => target = Some(token),
+                "wikiLinkAlias" => children = token.children,
+                _ => {}
+            }
+        }
+        let target = target.expect("expected target");
+        // An empty or whitespace-only alias falls back to the target.
+        let alias: String = children.iter().map(ToString::to_string).collect();
+        if alias.trim().is_empty() {
+            children.clear();
+            children.push(mdast::Node::Text(mdast::Text {
+                value: target.value.clone().into_owned(),
+                position: Some(target.position),
+            }));
+        }
+        let mut fields = BTreeMap::new();
+        fields.insert("target".into(), target.value.into_owned());
 
         mdast::Node::Custom(mdast::Custom {
             name: NAME.into(),
-            attributes,
-            children: vec![mdast::Node::Text(mdast::Text {
-                value: label.value.clone().into_owned(),
-                position: Some(label.position.clone()),
-            })],
+            fields,
+            children,
             ..mdast::Custom::default()
         })
     }
@@ -212,10 +224,7 @@ mod tests {
             _ => panic!("expected custom node"),
         };
         assert_eq!(custom.name, "wikiLink");
-        assert_eq!(
-            custom.attributes.get("target").map(String::as_str),
-            Some("b")
-        );
+        assert_eq!(custom.fields.get("target").map(String::as_str), Some("b"));
         assert_eq!(
             custom.position,
             Some(Position::new(1, 3, 2, 1, 10, 9)),

@@ -1,8 +1,8 @@
 //! Turn bytes of markdown into events.
 
 use crate::construct::text::MARKERS as TEXT_MARKERS;
-use crate::event::{Event, Point};
-use crate::extension::text_markers;
+use crate::event::{Content, Event, Point};
+use crate::extension::{text_markers, TokenKind};
 use crate::message;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::subtokenize;
@@ -30,8 +30,9 @@ pub struct ParseState<'a> {
     pub gfm_footnote_definitions: Vec<String>,
     /// Bytes that can start something in text, including plugin constructs.
     pub text_markers: Vec<u8>,
-    /// Names of plugin construct tokens: events refer to them by index.
-    pub extension_names: RefCell<Vec<&'static str>>,
+    /// Names of plugin construct tokens, with the content type of content
+    /// tokens: events refer to them by index.
+    pub extension_names: RefCell<Vec<(u8, &'static str, TokenKind)>>,
 }
 
 /// Turn a string of markdown into events.
@@ -72,6 +73,20 @@ pub fn parse<'a>(
     );
     let mut result = tokenizer.flush(state, true)?;
     let mut events = tokenizer.events;
+
+    // Documents inside plugin constructs first, so their definitions
+    // are known in all text.
+    if !options.flow_constructs.is_empty() {
+        loop {
+            let mut nested = subtokenize(&mut events, &parse_state, Some(&Content::Document))?;
+            let fn_defs = &mut parse_state.gfm_footnote_definitions;
+            fn_defs.append(&mut nested.gfm_footnote_definitions);
+            parse_state.definitions.append(&mut nested.definitions);
+            if nested.done {
+                break;
+            }
+        }
+    }
 
     loop {
         let fn_defs = &mut parse_state.gfm_footnote_definitions;

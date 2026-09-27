@@ -1,7 +1,7 @@
 //! Turn events into a syntax tree.
 
 use crate::event::{Event, Kind, Name};
-use crate::extension::{collect_tokens, is_extension, TextConstruct};
+use crate::extension::{balanced_exit, collect_tokens, construct, is_in_content, Token, TokenKind};
 use crate::mdast::{
     AttributeContent, AttributeValue, AttributeValueExpression, Blockquote, Break, Code,
     Definition, Delete, Emphasis, FootnoteDefinition, FootnoteReference, Heading, Html, Image,
@@ -21,6 +21,7 @@ use crate::util::{
     normalize_identifier::normalize_identifier,
     slice::{Position as SlicePosition, Slice},
 };
+use crate::ParseOptions;
 use alloc::{
     boxed::Box,
     format,
@@ -103,12 +104,14 @@ struct CompileContext<'a> {
     // Intermediate results.
     /// Primary tree and buffers.
     trees: Vec<(Node, Vec<usize>, Vec<usize>)>,
-    /// Plugin constructs, by index.
-    constructs: &'a [Box<dyn TextConstruct>],
+    /// Options, for plugin constructs.
+    options: &'a ParseOptions,
     /// Names of plugin construct tokens, by interned index.
-    extension_names: &'a [&'static str],
-    /// Index of the last event of the current plugin construct match.
-    extension_end: Option<usize>,
+    extension_names: &'a [(u8, &'static str, TokenKind)],
+    /// Plugin construct matches being compiled, innermost last.
+    extension_matches: Vec<ExtensionMatch<'a>>,
+    /// Last event of a plugin construct token in content, which is skipped.
+    extension_skip: Option<usize>,
     /// Current event index.
     index: usize,
 }
@@ -118,8 +121,8 @@ impl<'a> CompileContext<'a> {
     fn new(
         events: &'a [Event],
         bytes: &'a [u8],
-        constructs: &'a [Box<dyn TextConstruct>],
-        extension_names: &'a [&'static str],
+        options: &'a ParseOptions,
+        extension_names: &'a [(u8, &'static str, TokenKind)],
     ) -> CompileContext<'a> {
         let tree = Node::Root(Root {
             children: vec![],
@@ -149,9 +152,10 @@ impl<'a> CompileContext<'a> {
             media_reference_stack: vec![],
             raw_flow_fence_seen: false,
             trees: vec![(tree, vec![], vec![])],
-            constructs,
+            options,
             extension_names,
-            extension_end: None,
+            extension_matches: vec![],
+            extension_skip: None,
             index: 0,
         }
     }
@@ -242,10 +246,10 @@ impl<'a> CompileContext<'a> {
 pub fn compile(
     events: &[Event],
     bytes: &[u8],
-    constructs: &[Box<dyn TextConstruct>],
-    extension_names: &[&'static str],
+    options: &ParseOptions,
+    extension_names: &[(u8, &'static str, TokenKind)],
 ) -> Result<Node, message::Message> {
-    let mut context = CompileContext::new(events, bytes, constructs, extension_names);
+    let mut context = CompileContext::new(events, bytes, options, extension_names);
 
     let mut index = 0;
     while index < events.len() {
@@ -279,10 +283,45 @@ fn handle(context: &mut CompileContext, index: usize) -> Result<(), message::Mes
 
 /// Handle [`Enter`][Kind::Enter].
 fn enter(context: &mut CompileContext) -> Result<(), message::Message> {
-    if is_extension(&context.events[context.index].name) {
-        if context.extension_end.is_none() {
-            on_enter_extension(context);
+    // A match’s own events are skipped; its content compiles into a buffer.
+    let index = context.index;
+    if context.extension_skip.map_or(false, |until| index <= until) {
+        return Ok(());
+    }
+    if let Some(top) = context.extension_matches.last_mut() {
+        if top.inside {
+            // A token of a construct in its content, such as a line prefix.
+            if is_in_content(context.extension_names, &context.events[index]) {
+                context.extension_skip = Some(balanced_exit(context.events, index));
+                return Ok(());
+            }
+        } else {
+            if let Some(is_document) = top
+                .contents
+                .iter()
+                .find(|(_, enter, _, _)| *enter == index)
+                .map(|content| content.3)
+            {
+                top.inside = true;
+                if is_document {
+                    context.trees.push((
+                        Node::Root(Root {
+                            children: vec![],
+                            position: None,
+                        }),
+                        vec![],
+                        vec![],
+                    ));
+                } else {
+                    context.buffer();
+                }
+            }
+            return Ok(());
         }
+    }
+
+    if context.events[context.index].name == Name::Extension {
+        on_enter_extension(context);
         return Ok(());
     }
 
@@ -364,11 +403,43 @@ fn enter(context: &mut CompileContext) -> Result<(), message::Message> {
 
 /// Handle [`Exit`][Kind::Exit].
 fn exit(context: &mut CompileContext) -> Result<(), message::Message> {
-    if is_extension(&context.events[context.index].name) {
-        if context.extension_end == Some(context.index) {
-            context.extension_end = None;
+    let index = context.index;
+    if let Some(until) = context.extension_skip {
+        if index <= until {
+            if index == until {
+                context.extension_skip = None;
+            }
+            return Ok(());
         }
-        return Ok(());
+    }
+    if let Some(top) = context.extension_matches.last_mut() {
+        if !top.inside {
+            if index == top.end {
+                on_exit_extension(context);
+            }
+            return Ok(());
+        }
+        if let Some(token) = top
+            .contents
+            .iter()
+            .find(|(_, _, exit, _)| *exit == index)
+            .map(|(token, _, _, _)| *token)
+        {
+            top.inside = false;
+            let children = match context.resume() {
+                Node::Paragraph(Paragraph { children, .. }) | Node::Root(Root { children, .. }) => {
+                    children
+                }
+                _ => unreachable!("expected buffer"),
+            };
+            context
+                .extension_matches
+                .last_mut()
+                .expect("expected a match")
+                .tokens[token]
+                .children = children;
+            return Ok(());
+        }
     }
 
     match context.events[context.index].name {
@@ -1747,27 +1818,56 @@ fn position_from_event(event: &Event) -> Position {
     }
 }
 
+/// A plugin construct match being compiled.
+struct ExtensionMatch<'a> {
+    /// Index of the construct.
+    construct: u8,
+    /// Index of the first event of the match.
+    start: usize,
+    /// Index of the last event of the match.
+    end: usize,
+    tokens: Vec<Token<'a>>,
+    /// Content tokens: token index, enter and exit event indices, and whether
+    /// the content is a document.
+    contents: Vec<(usize, usize, usize, bool)>,
+    /// Whether the current event is inside content.
+    inside: bool,
+}
+
 /// Handle [`Enter`][Kind::Enter]:[`Extension`][Name::Extension], first of a
 /// match.
-///
-/// Lets the construct make one node of the match, which is added as a child.
 fn on_enter_extension(context: &mut CompileContext) {
-    let index = match context.events[context.index].name {
-        Name::Extension(index, _) => index,
-        _ => unreachable!("expected a construct to start with a token"),
-    };
-    let (tokens, end) = collect_tokens(
+    let event = &context.events[context.index];
+    let construct = context.extension_names[usize::from(event.extension)].0;
+    let found = collect_tokens(
         context.events,
         context.bytes,
         context.extension_names,
         context.index,
     );
-    let mut node = context.constructs[usize::from(index)].to_mdast(&tokens);
+    context.extension_matches.push(ExtensionMatch {
+        construct,
+        start: context.index,
+        end: found.end,
+        tokens: found.tokens,
+        contents: found.contents,
+        inside: false,
+    });
+}
+
+/// Handle the last event of a match.
+///
+/// Lets the construct make one node of the match, which is added as a child.
+fn on_exit_extension(context: &mut CompileContext) {
+    let done = context.extension_matches.pop().expect("expected a match");
+    let mut node = construct(context.options, done.construct)
+        .0
+        .to_mdast(done.tokens);
 
     if node.position().is_none() {
         node.position_set(Some(Position {
-            start: context.events[context.index].point.to_unist(),
-            end: context.events[end].point.to_unist(),
+            start: context.events[done.start].point.to_unist(),
+            end: context.events[done.end].point.to_unist(),
         }));
     }
 
@@ -1776,7 +1876,6 @@ fn on_enter_extension(context: &mut CompileContext) {
         .children_mut()
         .expect("expected a parent for a construct")
         .push(node);
-    context.extension_end = Some(end);
 }
 
 /// Resolve the current stack on the tree.

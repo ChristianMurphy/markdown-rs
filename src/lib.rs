@@ -64,6 +64,9 @@ pub use util::sanitize_uri::{normalize as normalize_uri, sanitize, sanitize_with
 pub use util::constant::{SAFE_PROTOCOL_HREF, SAFE_PROTOCOL_SRC};
 
 #[doc(hidden)]
+pub use util::char::{classify as classify_character, Kind as CharacterKind};
+
+#[doc(hidden)]
 pub use util::location::Location;
 
 pub use util::line_ending::LineEnding;
@@ -131,11 +134,9 @@ pub fn to_html(value: &str) -> String {
 /// ```
 pub fn to_html_with_options(value: &str, options: &Options) -> Result<String, message::Message> {
     let (events, parse_state) = parser::parse(value, &options.parse)?;
-    Ok(to_html::compile(
-        &events,
-        parse_state.bytes,
-        &options.compile,
-    ))
+    let names = parse_state.extension_names.borrow();
+    let html = to_html::compile(&events, parse_state.bytes, &options.compile, &names);
+    Ok(html)
 }
 
 /// Turn markdown into a syntax tree.
@@ -166,7 +167,7 @@ pub fn to_mdast(value: &str, options: &ParseOptions) -> Result<mdast::Node, mess
     let node = to_mdast::compile(
         &events,
         parse_state.bytes,
-        &options.text_constructs,
+        options,
         &parse_state.extension_names.borrow(),
     )?;
     Ok(node)

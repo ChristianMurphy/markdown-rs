@@ -1,0 +1,15 @@
+[package]
+description = "Prototype: highlighted text (`==mark==`) as a markdown_processor delimiter-run plugin"
+edition = "2018"
+license = "MIT"
+name = "mark"
+publish = false
+rust-version = "1.56"
+version = "0.0.0"
+
+[dependencies]
+markdown = { path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

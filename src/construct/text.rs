@@ -26,6 +26,7 @@
 
 use crate::construct::gfm_autolink_literal::resolve as resolve_gfm_autolink_literal;
 use crate::construct::partial_whitespace::resolve_whitespace;
+use crate::event::{Kind, Name};
 use crate::resolve::Name as ResolveName;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::Subresult;
@@ -100,16 +101,34 @@ pub fn before_construct(tokenizer: &mut Tokenizer, index: u8) -> State {
     let constructs = &tokenizer.parse_state.options.text_constructs;
     let mut index = usize::from(index);
 
+    // An escaped character is not markup before a construct, like micromark
+    // checking for `characterEscape`.
+    let previous = match tokenizer.events.last() {
+        Some(event) if event.kind == Kind::Exit && event.name == Name::CharacterEscape => None,
+        _ => tokenizer.previous,
+    };
+
     if let Some(byte) = tokenizer.current {
         while index < constructs.len() {
-            if byte != b'\n' && constructs[index].markers().contains(&byte) {
+            if byte != b'\n'
+                && constructs[index].markers().contains(&byte)
+                && constructs[index].previous(previous)
+            {
                 let next =
                     u8::try_from(index + 1).expect("expected fewer than 256 text constructs");
-                tokenizer.tokenize_state.extension_next = next;
+                crate::extension::ext_mut(tokenizer).next = next;
                 tokenizer.attempt(
                     State::Next(StateName::TextBefore),
                     State::Next(StateName::TextBeforeConstruct),
                 );
+
+                // A delimiter run: paired by the attention resolver.
+                if !constructs[index].attention_sizes().is_empty() {
+                    tokenizer.tokenize_state.marker = byte;
+                    tokenizer.enter(Name::AttentionSequence);
+                    return State::Retry(StateName::AttentionInside);
+                }
+
                 return crate::extension::start(tokenizer, next - 1);
             }
             index += 1;
@@ -126,7 +145,7 @@ pub fn before_construct(tokenizer: &mut Tokenizer, index: u8) -> State {
 ///     ^
 /// ```
 pub fn before_construct_next(tokenizer: &mut Tokenizer) -> State {
-    let next = tokenizer.tokenize_state.extension_next;
+    let next = crate::extension::ext(tokenizer).next;
     before_construct(tokenizer, next)
 }
 
@@ -307,7 +326,7 @@ pub fn resolve(tokenizer: &mut Tokenizer) -> Option<Subresult> {
     resolve_whitespace(
         tokenizer,
         tokenizer.parse_state.options.constructs.hard_break_trailing,
-        true,
+        !crate::extension::ext(tokenizer).text,
     );
 
     if tokenizer

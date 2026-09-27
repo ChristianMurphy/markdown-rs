@@ -1,0 +1,15 @@
+[package]
+description = "Prototype: admonitions (`!!! note \"Title\"` with an indented body) as a markdown_processor container plugin"
+edition = "2018"
+license = "MIT"
+name = "admonition"
+publish = false
+rust-version = "1.56"
+version = "0.0.0"
+
+[dependencies]
+markdown = { path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

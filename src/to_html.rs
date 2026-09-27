@@ -1,6 +1,6 @@
 //! Turn events into a string of HTML.
 use crate::event::{Event, Kind, Name};
-use crate::extension::is_extension;
+use crate::extension::{balanced_exit, collect_tokens, is_in_content, own_text, TokenKind};
 use crate::mdast::AlignKind;
 use crate::util::{
     character_reference::decode as decode_character_reference,
@@ -130,10 +130,28 @@ struct CompileContext<'a> {
     buffers: Vec<String>,
     /// Current event index.
     index: usize,
-    /// Depth of plugin construct tokens: only the outermost are written.
-    extension_depth: usize,
-    /// Index of the enter event of the outermost open plugin construct token.
-    extension_enter: usize,
+    /// Names of plugin construct tokens, by interned index.
+    extension_names: &'a [(u8, &'static str, TokenKind)],
+    /// Plugin construct matches being written, innermost last.
+    extension_matches: Vec<HtmlMatch>,
+    /// Last event of a plugin construct token in content, which is skipped.
+    extension_skip: Option<usize>,
+}
+
+/// A plugin construct match being written: its own text as source text,
+/// its content as HTML.
+#[derive(Debug)]
+struct HtmlMatch {
+    /// Index of the last event of the match.
+    end: usize,
+    /// Enter and exit indices of content tokens.
+    contents: Vec<(usize, usize)>,
+    /// Events left out of the construct’s text.
+    excluded: Vec<(usize, usize)>,
+    /// Event from which the construct’s text is not yet written.
+    cursor: usize,
+    /// Whether the current event is inside content.
+    inside: bool,
 }
 
 impl<'a> CompileContext<'a> {
@@ -143,6 +161,7 @@ impl<'a> CompileContext<'a> {
         bytes: &'a [u8],
         options: &'a CompileOptions,
         line_ending: LineEnding,
+        extension_names: &'a [(u8, &'static str, TokenKind)],
     ) -> CompileContext<'a> {
         CompileContext {
             events,
@@ -169,8 +188,9 @@ impl<'a> CompileContext<'a> {
             line_ending_default: line_ending,
             buffers: vec![String::new()],
             index: 0,
-            extension_depth: 0,
-            extension_enter: 0,
+            extension_names,
+            extension_matches: vec![],
+            extension_skip: None,
             options,
         }
     }
@@ -211,7 +231,12 @@ impl<'a> CompileContext<'a> {
 }
 
 /// Turn events and bytes into a string of HTML.
-pub fn compile(events: &[Event], bytes: &[u8], options: &CompileOptions) -> String {
+pub fn compile(
+    events: &[Event],
+    bytes: &[u8],
+    options: &CompileOptions,
+    extension_names: &[(u8, &'static str, TokenKind)],
+) -> String {
     let mut index = 0;
     let mut line_ending_inferred = None;
 
@@ -235,7 +260,8 @@ pub fn compile(events: &[Event], bytes: &[u8], options: &CompileOptions) -> Stri
     let line_ending_default =
         line_ending_inferred.unwrap_or_else(|| options.default_line_ending.clone());
 
-    let mut context = CompileContext::new(events, bytes, options, line_ending_default);
+    let mut context =
+        CompileContext::new(events, bytes, options, line_ending_default, extension_names);
     let mut definition_indices = vec![];
     let mut index = 0;
     let mut definition_inside = false;
@@ -318,11 +344,53 @@ fn handle(context: &mut CompileContext, index: usize) {
 
 /// Handle [`Enter`][Kind::Enter].
 fn enter(context: &mut CompileContext) {
-    if is_extension(&context.events[context.index].name) {
-        if context.extension_depth == 0 {
-            context.extension_enter = context.index;
+    // Plugin constructs: their own text as text, their content as HTML.
+    let index = context.index;
+    if context.extension_skip.map_or(false, |until| index <= until) {
+        return;
+    }
+    if let Some(top) = context.extension_matches.last_mut() {
+        if top.inside {
+            // A token of a construct in its content, such as a line prefix.
+            if is_in_content(context.extension_names, &context.events[index]) {
+                context.extension_skip = Some(balanced_exit(context.events, index));
+                return;
+            }
+        } else {
+            if top.contents.iter().any(|(enter, _)| *enter == index) {
+                top.inside = true;
+                let text = own_text(
+                    context.events,
+                    context.bytes,
+                    top.cursor,
+                    index,
+                    &top.excluded,
+                );
+                let value = encode(&text, context.encode_html);
+                context.push(&value);
+            }
+            return;
         }
-        context.extension_depth += 1;
+    }
+
+    if context.events[index].name == Name::Extension {
+        let found = collect_tokens(
+            context.events,
+            context.bytes,
+            context.extension_names,
+            index,
+        );
+        context.extension_matches.push(HtmlMatch {
+            end: found.end,
+            contents: found
+                .contents
+                .iter()
+                .map(|(_, enter, exit, _)| (*enter, *exit))
+                .collect(),
+            excluded: found.excluded,
+            cursor: index,
+            inside: false,
+        });
         return;
     }
 
@@ -377,20 +445,37 @@ fn enter(context: &mut CompileContext) {
 
 /// Handle [`Exit`][Kind::Exit].
 fn exit(context: &mut CompileContext) {
-    // Plugin constructs are written as text.
-    if is_extension(&context.events[context.index].name) {
-        context.extension_depth -= 1;
-        if context.extension_depth == 0 {
-            let value = Slice::from_position(
-                context.bytes,
-                &Position {
-                    start: &context.events[context.extension_enter].point,
-                    end: &context.events[context.index].point,
-                },
-            );
-            context.push(&encode(value.as_str(), context.encode_html));
+    let index = context.index;
+    if let Some(until) = context.extension_skip {
+        if index <= until {
+            if index == until {
+                context.extension_skip = None;
+            }
+            return;
         }
-        return;
+    }
+    if let Some(top) = context.extension_matches.last_mut() {
+        if top.inside {
+            if top.contents.iter().any(|(_, exit)| *exit == index) {
+                top.inside = false;
+                top.cursor = index;
+                return;
+            }
+        } else {
+            if index == top.end {
+                let text = own_text(
+                    context.events,
+                    context.bytes,
+                    top.cursor,
+                    index,
+                    &top.excluded,
+                );
+                let value = encode(&text, context.encode_html);
+                context.extension_matches.pop();
+                context.push(&value);
+            }
+            return;
+        }
     }
 
     match context.events[context.index].name {
@@ -1390,7 +1475,7 @@ fn on_exit_list(context: &mut CompileContext) {
 /// Handle [`Exit`][Kind::Exit]:[`ListItem`][Name::ListItem].
 fn on_exit_list_item(context: &mut CompileContext) {
     let tight = context.tight_stack.last().unwrap_or(&false);
-    let before_item = skip::opt_back(
+    let before_item = skip::opt_back_with_extensions(
         context.events,
         context.index - 1,
         &[
@@ -1402,6 +1487,7 @@ fn on_exit_list_item(context: &mut CompileContext) {
             Name::Definition,
             Name::GfmFootnoteDefinition,
         ],
+        context.extension_names,
     );
     let previous = &context.events[before_item];
     let tight_paragraph = *tight && previous.name == Name::Paragraph;
