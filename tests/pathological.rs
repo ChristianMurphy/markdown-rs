@@ -39,7 +39,9 @@ fn fastest_parse(value: String, options: fn() -> ParseOptions) -> Duration {
             (0..5)
                 .map(|_| {
                     let start = Instant::now();
-                    to_mdast(&value, &options).unwrap();
+                    if let Err(message) = to_mdast(&value, &options) {
+                        assert_eq!(*message.rule_id, "mdx-parse-budget", "{}", message);
+                    }
                     start.elapsed()
                 })
                 .min()
@@ -268,6 +270,14 @@ fn mdx_constant_parser() -> ParseOptions {
     }
 }
 
+/// MDX without a JavaScript parser, with a parse budget.
+fn mdx_budget() -> ParseOptions {
+    ParseOptions {
+        mdx_parse_budget_factor: Some(4),
+        ..ParseOptions::mdx()
+    }
+}
+
 #[test]
 fn pathological_mdx() {
     let mdx = ParseOptions::mdx;
@@ -295,6 +305,18 @@ fn pathological_mdx() {
         |n| format!("{}> {}x", "> {\n".repeat(n), "}".repeat(n)),
         500,
         mdx,
+    );
+    assert_near_linear(
+        "flow expressions failing after a tag, with a budget",
+        |n| format!("{}{}", "{\n".repeat(n), "}<a/>x".repeat(n)),
+        500,
+        mdx_budget,
+    );
+    assert_near_linear(
+        "tags failing after an attribute expression, with a budget",
+        |n| format!("{}{}x</a>", "<a b={\n".repeat(n), "}>".repeat(n)),
+        500,
+        mdx_budget,
     );
 }
 

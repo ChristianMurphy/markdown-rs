@@ -35,7 +35,7 @@ use crate::state::{Name as StateName, State};
 use crate::tokenizer::Tokenizer;
 use crate::util::location::Location;
 use crate::util::{
-    mdx_collect::{collect_new, collected, reset_collect},
+    mdx_collect::{charge_parse_budget, collect_new, collected, reset_collect},
     slice::Slice,
 };
 use crate::MdxSignal;
@@ -201,7 +201,12 @@ fn parse_esm(tokenizer: &mut Tokenizer) -> State {
 
     // Collect the body of the ESM and positional info for each run of it.
     collect_new(tokenizer, &[Name::MdxEsmData, Name::LineEnding]);
+    // At the keyword.
+    let place = &tokenizer.events[tokenizer.tokenize_state.start].point;
     let result = collected(tokenizer);
+    if let Some(error) = charge_parse_budget(tokenizer, result.value.len(), place) {
+        return error;
+    }
 
     // Parse and handle what was signaled back.
     match parse(&result.value) {

@@ -1,6 +1,8 @@
 //! Collect info for MDX.
 
-use crate::event::{Event, Kind, Name};
+use crate::event::{Event, Kind, Name, Point};
+use crate::message;
+use crate::state::State;
 use crate::tokenizer::Tokenizer;
 use crate::util::slice::{Position, Slice};
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -99,4 +101,20 @@ pub fn collect_new(tokenizer: &mut Tokenizer, names: &[Name]) {
 /// Body collected by the last call to `collect_new`.
 pub fn collected<'a>(tokenizer: &'a Tokenizer) -> &'a Result {
     &tokenizer.tokenize_state.mdx_collect.as_ref().unwrap().1
+}
+
+/// Take `len` bytes from the MDX reading budget; an error at `place` if spent.
+pub fn charge_parse_budget(tokenizer: &Tokenizer, len: usize, place: &Point) -> Option<State> {
+    let budget = tokenizer.parse_state.mdx_parse_budget.as_ref()?;
+    if let Some(left) = budget.get().checked_sub(len) {
+        budget.set(left);
+        None
+    } else {
+        Some(State::Error(message::Message {
+            place: Some(Box::new(message::Place::Point(place.to_unist()))),
+            reason: "Unexpected MDX expression or ESM that needs more parsing than `mdx_parse_budget_factor` allows".into(),
+            rule_id: Box::new("mdx-parse-budget".into()),
+            source: Box::new("markdown-rs".into()),
+        }))
+    }
 }
