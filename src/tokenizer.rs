@@ -18,7 +18,7 @@ use crate::subtokenize::Subresult;
 #[cfg(feature = "log")]
 use crate::util::char::format_byte_opt;
 
-use crate::util::{constant::TAB_SIZE, edit_map::EditMap};
+use crate::util::{constant::TAB_SIZE, edit_map::EditMap, mdx_collect};
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::ops::Range;
 
@@ -116,6 +116,19 @@ pub struct RawTextRuns {
     pub complete_from: Option<usize>,
     /// Per run size, sorted: the start of the last run seen of that size.
     pub last_start: Vec<(usize, usize)>,
+}
+
+/// Braces counted by MDX expressions (flow) without a JavaScript parser.
+#[derive(Debug, Default)]
+pub struct MdxBraces {
+    /// Whether the current expression records its braces.
+    pub recording: bool,
+    /// Opening braces, sorted, and whether an expression there fails.
+    pub opening: Vec<(usize, bool)>,
+    /// Indices into `opening` of braces not yet closed.
+    pub open: Vec<usize>,
+    /// End of the last recorded expression; earlier starts do not record.
+    pub until: usize,
 }
 
 /// Label start, looking for an end.
@@ -251,6 +264,11 @@ pub struct TokenizeState<'a> {
     pub gfm_autolink_literal_www_start: usize,
     /// Last invalid `www.` domain; domains starting in it are invalid too.
     pub gfm_autolink_literal_www_nok: Range<usize>,
+    /// Body of the current MDX expression or ESM so far, and the next event to
+    /// collect.
+    pub mdx_collect: Option<Box<(usize, mdx_collect::Result)>>,
+    /// MDX expression (flow) braces, once one fails after its closing brace.
+    pub mdx_braces: Option<Box<MdxBraces>>,
     /// List of unusable label starts.
     ///
     /// Used when tokenizing [text content][crate::construct::text].
@@ -399,6 +417,8 @@ impl<'a> Tokenizer<'a> {
                 gfm_autolink_literal_trail_nok: 0..0,
                 gfm_autolink_literal_www_start: usize::MAX,
                 gfm_autolink_literal_www_nok: 0..0,
+                mdx_collect: None,
+                mdx_braces: None,
                 label_starts_loose: vec![],
                 marker: 0,
                 marker_b: 0,
@@ -865,5 +885,20 @@ fn byte_action(bytes: &[u8], point: &Point) -> ByteAction {
         }
     } else {
         unreachable!("out of bounds")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenizer_size() {
+        // Boxed per document; glibc allocates larger boxes on a slower path.
+        assert!(
+            core::mem::size_of::<Tokenizer>() <= 1000,
+            "expected `Tokenizer` to stay small enough to allocate as small ({} bytes)",
+            core::mem::size_of::<Tokenizer>()
+        );
     }
 }

@@ -1,4 +1,4 @@
-use markdown::{to_mdast, ParseOptions};
+use markdown::{to_mdast, MdxSignal, ParseOptions};
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -236,6 +236,65 @@ fn pathological_autolink_literals() {
         |n| format!("www.a{}b", "._".repeat(n)),
         1_000,
         gfm,
+    );
+}
+
+/// MDX with a stand-in JavaScript parser that decides in constant time.
+fn mdx_constant_parser() -> ParseOptions {
+    ParseOptions {
+        mdx_expression_parse: Some(Box::new(|value, _kind| {
+            if value.ends_with(';') {
+                MdxSignal::Ok
+            } else {
+                MdxSignal::Eof(
+                    "more".into(),
+                    Box::new("test".into()),
+                    Box::new("eof".into()),
+                )
+            }
+        })),
+        mdx_esm_parse: Some(Box::new(|value| {
+            if value.ends_with(']') {
+                MdxSignal::Ok
+            } else {
+                MdxSignal::Eof(
+                    "more".into(),
+                    Box::new("test".into()),
+                    Box::new("eof".into()),
+                )
+            }
+        })),
+        ..ParseOptions::mdx()
+    }
+}
+
+#[test]
+fn pathological_mdx() {
+    let mdx = ParseOptions::mdx;
+
+    assert_near_linear(
+        "expression asking for more",
+        |n| format!("{{{};}}", "}".repeat(n)),
+        4_000,
+        mdx_constant_parser,
+    );
+    assert_near_linear(
+        "ESM asking for more",
+        |n| format!("export const a = [\n{}]", "b,\n\n".repeat(n)),
+        500,
+        mdx_constant_parser,
+    );
+    assert_near_linear(
+        "flow expressions failing after their brace",
+        |n| format!("{}{}x", "{\n".repeat(n), "}".repeat(n)),
+        500,
+        mdx,
+    );
+    assert_near_linear(
+        "flow expressions failing after their brace in a block quote",
+        |n| format!("{}> {}x", "> {\n".repeat(n), "}".repeat(n)),
+        500,
+        mdx,
     );
 }
 

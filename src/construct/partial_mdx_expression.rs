@@ -56,11 +56,13 @@
 //! [mdx_expression_text]: crate::construct::mdx_expression_text
 //! [interleaving]: https://mdxjs.com/docs/what-is-mdx/#interleaving
 
+use crate::construct::mdx_expression_flow::fails_after;
 use crate::event::Name;
 use crate::message;
 use crate::state::{Name as StateName, State};
 use crate::tokenizer::Tokenizer;
-use crate::util::mdx_collect::collect;
+use crate::util::location::Location;
+use crate::util::mdx_collect::{collect_new, collected, reset_collect};
 use crate::{MdxExpressionKind, MdxExpressionParse, MdxSignal};
 use alloc::boxed::Box;
 
@@ -77,6 +79,10 @@ pub fn start(tokenizer: &mut Tokenizer) -> State {
     tokenizer.consume();
     tokenizer.exit(Name::MdxExpressionMarker);
     tokenizer.tokenize_state.start = tokenizer.events.len() - 1;
+    reset_collect(tokenizer);
+    if let Some(braces) = &mut tokenizer.tokenize_state.mdx_braces {
+        braces.recording = tokenizer.point.index > braces.until;
+    }
     State::Next(StateName::MdxExpressionBefore)
 }
 
@@ -114,6 +120,13 @@ pub fn before(tokenizer: &mut Tokenizer) -> State {
             };
 
             if state == State::Ok {
+                if let Some(braces) = &mut tokenizer.tokenize_state.mdx_braces {
+                    if braces.recording {
+                        debug_assert!(braces.open.is_empty(), "expected braces to pair up");
+                        braces.recording = false;
+                        braces.until = tokenizer.point.index;
+                    }
+                }
                 tokenizer.tokenize_state.start = 0;
                 tokenizer.enter(Name::MdxExpressionMarker);
                 tokenizer.consume();
@@ -148,8 +161,22 @@ pub fn inside(tokenizer: &mut Tokenizer) -> State {
             && tokenizer.parse_state.options.mdx_expression_parse.is_none()
         {
             tokenizer.tokenize_state.size += 1;
+            if let Some(braces) = &mut tokenizer.tokenize_state.mdx_braces {
+                if braces.recording {
+                    braces.open.push(braces.opening.len());
+                    braces.opening.push((tokenizer.point.index, false));
+                }
+            }
         } else if tokenizer.current == Some(b'}') {
             tokenizer.tokenize_state.size -= 1;
+            if let Some(braces) = &mut tokenizer.tokenize_state.mdx_braces {
+                if braces.recording {
+                    if let Some(position) = braces.open.pop() {
+                        braces.opening[position].1 =
+                            fails_after(tokenizer.parse_state, tokenizer.point.index + 1);
+                    }
+                }
+            }
         }
 
         tokenizer.consume();
@@ -218,13 +245,8 @@ pub fn prefix(tokenizer: &mut Tokenizer) -> State {
 /// Parse an expression with a given function.
 fn parse_expression(tokenizer: &mut Tokenizer, parse: &MdxExpressionParse) -> State {
     // Collect the body of the expression and positional info for each run of it.
-    let result = collect(
-        &tokenizer.events,
-        tokenizer.parse_state.bytes,
-        tokenizer.tokenize_state.start,
-        &[Name::MdxExpressionData, Name::LineEnding],
-        &[],
-    );
+    collect_new(tokenizer, &[Name::MdxExpressionData, Name::LineEnding]);
+    let result = collected(tokenizer);
 
     // Turn the name of the expression into a kind.
     let kind = match tokenizer.tokenize_state.token_1 {
@@ -238,11 +260,7 @@ fn parse_expression(tokenizer: &mut Tokenizer, parse: &MdxExpressionParse) -> St
     match parse(&result.value, &kind) {
         MdxSignal::Ok => State::Ok,
         MdxSignal::Error(reason, relative, source, rule_id) => {
-            let point = tokenizer
-                .parse_state
-                .location
-                .as_ref()
-                .expect("expected location index if aware mdx is on")
+            let point = Location::new(tokenizer.parse_state.bytes)
                 .relative_to_point(&result.stops, relative)
                 .unwrap_or_else(|| tokenizer.point.to_unist());
 

@@ -33,7 +33,11 @@ use crate::event::Name;
 use crate::message;
 use crate::state::{Name as StateName, State};
 use crate::tokenizer::Tokenizer;
-use crate::util::{mdx_collect::collect, slice::Slice};
+use crate::util::location::Location;
+use crate::util::{
+    mdx_collect::{collect_new, collected, reset_collect},
+    slice::Slice,
+};
 use crate::MdxSignal;
 use alloc::boxed::Box;
 
@@ -85,6 +89,7 @@ pub fn word(tokenizer: &mut Tokenizer) -> State {
         if matches!(slice.as_str(), "export" | "import") && tokenizer.current == Some(b' ') {
             tokenizer.concrete = true;
             tokenizer.tokenize_state.start = tokenizer.events.len() - 1;
+            reset_collect(tokenizer);
             tokenizer.consume();
             State::Next(StateName::MdxEsmInside)
         } else {
@@ -195,23 +200,14 @@ fn parse_esm(tokenizer: &mut Tokenizer) -> State {
         .unwrap();
 
     // Collect the body of the ESM and positional info for each run of it.
-    let result = collect(
-        &tokenizer.events,
-        tokenizer.parse_state.bytes,
-        tokenizer.tokenize_state.start,
-        &[Name::MdxEsmData, Name::LineEnding],
-        &[],
-    );
+    collect_new(tokenizer, &[Name::MdxEsmData, Name::LineEnding]);
+    let result = collected(tokenizer);
 
     // Parse and handle what was signaled back.
     match parse(&result.value) {
         MdxSignal::Ok => State::Ok,
         MdxSignal::Error(message, relative, source, rule_id) => {
-            let point = tokenizer
-                .parse_state
-                .location
-                .as_ref()
-                .expect("expected location index if aware mdx is on")
+            let point = Location::new(tokenizer.parse_state.bytes)
                 .relative_to_point(&result.stops, relative)
                 .expect("expected non-empty string");
             State::Error(message::Message {

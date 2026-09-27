@@ -54,17 +54,9 @@ impl Location {
     /// Port of <https://github.com/vfile/vfile-location/blob/main/index.js>
     #[must_use]
     pub fn to_point(&self, offset: usize) -> Option<Point> {
-        let mut index = 0;
-
         if let Some(end) = self.indices.last() {
             if offset < *end {
-                while index < self.indices.len() {
-                    if self.indices[index] > offset {
-                        break;
-                    }
-
-                    index += 1;
-                }
+                let index = self.indices.partition_point(|end| *end <= offset);
 
                 let previous = if index > 0 {
                     self.indices[index - 1]
