@@ -547,6 +547,26 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    /// Same as `consume_run` with `LINE_STOP`.
+    pub fn consume_line_run(&mut self) {
+        #[cfg(feature = "memchr")]
+        {
+            self.consume();
+            let bytes = self.parse_state.bytes;
+            let start = self.point.index;
+            let rest = &bytes[start..self.push_end.max(start)];
+            let len = memchr::memchr3(b'\n', b'\r', b'\t', rest).unwrap_or(rest.len());
+
+            if len > 0 {
+                self.point.index = start + len;
+                self.point.column += len;
+                self.previous = Some(bytes[start + len - 1]);
+            }
+        }
+        #[cfg(not(feature = "memchr"))]
+        self.consume_run(&LINE_STOP);
+    }
+
     /// Move to the next (virtual) byte.
     fn move_one(&mut self) {
         match byte_action(self.parse_state.bytes, &self.point) {
