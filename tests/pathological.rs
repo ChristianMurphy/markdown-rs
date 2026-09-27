@@ -109,6 +109,12 @@ fn pathological_attention() {
     );
     assert_near_linear("emphasis pairs", |n| "a*".repeat(n), 4_000, commonmark);
     assert_near_linear(
+        "mismatched markers",
+        |n| "*a_ ".repeat(n),
+        4_000,
+        commonmark,
+    );
+    assert_near_linear(
         "ambiguous closers",
         |n| format!("a**b{}", "c*".repeat(n)),
         4_000,
