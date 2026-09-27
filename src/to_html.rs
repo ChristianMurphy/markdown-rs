@@ -3,10 +3,10 @@ use crate::event::{Event, Kind, Name};
 use crate::mdast::AlignKind;
 use crate::util::{
     character_reference::decode as decode_character_reference,
-    constant::{SAFE_PROTOCOL_HREF, SAFE_PROTOCOL_SRC},
+    constant::{GFM_FOOTNOTE_CALL_LINEAR_MAX, SAFE_PROTOCOL_HREF, SAFE_PROTOCOL_SRC},
     encode::encode,
     gfm_tagfilter::gfm_tagfilter,
-    infer::{gfm_table_align, list_loose},
+    infer::{gfm_table_align, ListSpread},
     normalize_identifier::normalize_identifier,
     sanitize_uri::{sanitize, sanitize_with_protocols},
     skip,
@@ -14,6 +14,7 @@ use crate::util::{
 };
 use crate::{CompileOptions, LineEnding};
 use alloc::{
+    collections::BTreeMap,
     format,
     string::{String, ToString},
     vec,
@@ -29,10 +30,10 @@ struct Media {
     /// Whether this represents an image (`true`) or a link or definition
     /// (`false`).
     image: bool,
-    /// The text between the brackets (`x` in `![x]()` and `[x]()`).
-    ///
-    /// Not interpreted.
-    label_id: Option<(usize, usize)>,
+    /// Whether the label ends up in the output: images and links.
+    writes_label: bool,
+    /// Exit of the text between the brackets (`x` in `![x]()` and `[x]()`).
+    label_text_exit: Option<usize>,
     /// The result of interpreting the text between the brackets
     /// (`x` in `![x]()` and `[x]()`).
     ///
@@ -104,11 +105,15 @@ struct CompileContext<'a> {
     media_stack: Vec<Media>,
     /// Stack of containers.
     tight_stack: Vec<bool>,
+    /// Looseness of lists, found when the first list starts.
+    list_spread: Option<ListSpread>,
     /// List of definitions.
     definitions: Vec<Definition>,
     /// List of definitions.
     gfm_footnote_definitions: Vec<(String, String)>,
     gfm_footnote_definition_calls: Vec<(String, usize)>,
+    /// Index into `gfm_footnote_definition_calls` by identifier, once large.
+    gfm_footnote_definition_call_index: Option<BTreeMap<String, usize>>,
     gfm_footnote_definition_stack: Vec<(usize, usize)>,
     /// Whether we are in a GFM table head.
     gfm_table_in_head: bool,
@@ -153,11 +158,13 @@ impl<'a> CompileContext<'a> {
             definitions: vec![],
             gfm_footnote_definitions: vec![],
             gfm_footnote_definition_calls: vec![],
+            gfm_footnote_definition_call_index: None,
             gfm_footnote_definition_stack: vec![],
             gfm_table_in_head: false,
             gfm_table_align: None,
             gfm_table_column: 0,
             tight_stack: vec![],
+            list_spread: None,
             slurp_one_line_ending: false,
             image_alt_inside: false,
             encode_html: true,
@@ -265,6 +272,14 @@ pub fn compile(events: &[Event], bytes: &[u8], options: &CompileOptions) -> Stri
         index += 1;
     }
 
+    // Sorted by identifier, first definition first, for binary search.
+    context
+        .definitions
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    context
+        .definitions
+        .dedup_by(|right, left| left.id == right.id);
+
     let mut index = 0;
     let jump_default = (events.len(), events.len());
     let mut definition_index = 0;
@@ -320,7 +335,6 @@ fn enter(context: &mut CompileContext) {
         | Name::GfmFootnoteDefinitionPrefix
         | Name::HeadingAtxText
         | Name::HeadingSetextText
-        | Name::Label
         | Name::MdxEsm
         | Name::MdxFlowExpression
         | Name::MdxTextExpression
@@ -355,6 +369,7 @@ fn enter(context: &mut CompileContext) {
         Name::Paragraph => on_enter_paragraph(context),
         Name::Resource => on_enter_resource(context),
         Name::ResourceDestinationString => on_enter_resource_destination_string(context),
+        Name::Label => on_enter_label(context),
         Name::Strong => on_enter_strong(context),
         _ => {}
     }
@@ -492,9 +507,10 @@ fn on_enter_raw_text(context: &mut CompileContext) {
 fn on_enter_definition(context: &mut CompileContext) {
     context.buffer();
     context.media_stack.push(Media {
+        writes_label: false,
         image: false,
         label: None,
-        label_id: None,
+        label_text_exit: None,
         reference_id: None,
         destination: None,
         title: None,
@@ -527,8 +543,9 @@ fn on_enter_gfm_footnote_definition(context: &mut CompileContext) {
 /// Handle [`Enter`][Kind::Enter]:[`GfmFootnoteCall`][Name::GfmFootnoteCall].
 fn on_enter_gfm_footnote_call(context: &mut CompileContext) {
     context.media_stack.push(Media {
+        writes_label: false,
         image: false,
-        label_id: None,
+        label_text_exit: None,
         label: None,
         reference_id: None,
         destination: None,
@@ -626,8 +643,9 @@ fn on_enter_html_text(context: &mut CompileContext) {
 /// Handle [`Enter`][Kind::Enter]:[`Image`][Name::Image].
 fn on_enter_image(context: &mut CompileContext) {
     context.media_stack.push(Media {
+        writes_label: true,
         image: true,
-        label_id: None,
+        label_text_exit: None,
         label: None,
         reference_id: None,
         destination: None,
@@ -639,8 +657,9 @@ fn on_enter_image(context: &mut CompileContext) {
 /// Handle [`Enter`][Kind::Enter]:[`Link`][Name::Link].
 fn on_enter_link(context: &mut CompileContext) {
     context.media_stack.push(Media {
+        writes_label: true,
         image: false,
-        label_id: None,
+        label_text_exit: None,
         label: None,
         reference_id: None,
         destination: None,
@@ -650,7 +669,11 @@ fn on_enter_link(context: &mut CompileContext) {
 
 /// Handle [`Enter`][Kind::Enter]:{[`ListOrdered`][Name::ListOrdered],[`ListUnordered`][Name::ListUnordered]}.
 fn on_enter_list(context: &mut CompileContext) {
-    let loose = list_loose(context.events, context.index, true);
+    let events = context.events;
+    let loose = context
+        .list_spread
+        .get_or_insert_with(|| ListSpread::new(events))
+        .loose(context.index);
     context.tight_stack.push(!loose);
     context.line_ending_if_needed();
 
@@ -868,49 +891,26 @@ fn on_exit_raw_flow(context: &mut CompileContext) {
 
 /// Handle [`Exit`][Kind::Exit]:{[`CodeText`][Name::CodeText],[`MathText`][Name::MathText]}.
 fn on_exit_raw_text(context: &mut CompileContext) {
-    let result = context.resume();
+    let mut value = context.resume();
     // To do: share with `to_mdast`.
-    let mut bytes = result.as_bytes().to_vec();
-
     // If we are in a GFM table, we need to decode escaped pipes.
     // This is a rather weird GFM feature.
-    if context.gfm_table_align.is_some() {
-        let mut index = 0;
-        let mut len = bytes.len();
-
-        while index < len {
-            if index + 1 < len && bytes[index] == b'\\' && bytes[index + 1] == b'|' {
-                bytes.remove(index);
-                len -= 1;
-            }
-
-            index += 1;
-        }
+    if context.gfm_table_align.is_some() && value.contains("\\|") {
+        value = value.replace("\\|", "|");
     }
 
-    let mut trim = false;
-    let mut index = 0;
-    let mut end = bytes.len();
-
-    if end > 2 && bytes[index] == b' ' && bytes[end - 1] == b' ' {
-        index += 1;
-        end -= 1;
-        while index < end && !trim {
-            if bytes[index] != b' ' {
-                trim = true;
-                break;
-            }
-            index += 1;
-        }
-    }
-
-    if trim {
-        bytes.remove(0);
-        bytes.pop();
-    }
+    let bytes = value.as_bytes();
+    let trim = bytes.len() > 2
+        && bytes[0] == b' '
+        && bytes[bytes.len() - 1] == b' '
+        && bytes[1..bytes.len() - 1].iter().any(|byte| *byte != b' ');
 
     context.raw_text_inside = false;
-    context.push(str::from_utf8(&bytes).unwrap());
+    context.push(if trim {
+        &value[1..value.len() - 1]
+    } else {
+        &value
+    });
 
     if !context.image_alt_inside {
         context.push("</code>");
@@ -1065,24 +1065,42 @@ fn on_exit_gfm_autolink_literal_xmpp(context: &mut CompileContext) {
 
 /// Handle [`Exit`][Kind::Exit]:[`GfmFootnoteCall`][Name::GfmFootnoteCall].
 fn on_exit_gfm_footnote_call(context: &mut CompileContext) {
-    let indices = context.media_stack.pop().unwrap().label_id.unwrap();
+    let media = context.media_stack.pop().unwrap();
+    let indices = label_id(context, media.label_text_exit).unwrap();
     let id =
         normalize_identifier(Slice::from_indices(context.bytes, indices.0, indices.1).as_str());
     let safe_id = sanitize(&id.to_lowercase());
-    let mut call_index = 0;
+    let calls = &mut context.gfm_footnote_definition_calls;
 
     // See if this has been called before.
-    while call_index < context.gfm_footnote_definition_calls.len() {
-        if context.gfm_footnote_definition_calls[call_index].0 == id {
-            break;
-        }
-        call_index += 1;
-    }
+    let found = if let Some(call_index) = &context.gfm_footnote_definition_call_index {
+        call_index.get(&id).copied()
+    } else {
+        calls.iter().position(|call| call.0 == id)
+    };
 
-    // New.
-    if call_index == context.gfm_footnote_definition_calls.len() {
-        context.gfm_footnote_definition_calls.push((id, 0));
-    }
+    let call_index = if let Some(call_index) = found {
+        call_index
+    } else {
+        // New.
+        let call_index = calls.len();
+        if let Some(index) = &mut context.gfm_footnote_definition_call_index {
+            index.insert(id.clone(), call_index);
+        }
+        calls.push((id, 0));
+        if context.gfm_footnote_definition_call_index.is_none()
+            && calls.len() > GFM_FOOTNOTE_CALL_LINEAR_MAX
+        {
+            context.gfm_footnote_definition_call_index = Some(
+                calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| (call.0.clone(), index))
+                    .collect(),
+            );
+        }
+        call_index
+    };
 
     // Increment.
     context.gfm_footnote_definition_calls[call_index].1 += 1;
@@ -1310,16 +1328,38 @@ fn on_exit_html_data(context: &mut CompileContext) {
     context.push(&encoded);
 }
 
+/// Whether the label of the current media goes straight into an image alt.
+fn label_streams_into_alt(context: &CompileContext) -> bool {
+    let end = context.media_stack.len() - 1;
+    context.media_stack[end].writes_label
+        && context.media_stack[..end].iter().any(|media| media.image)
+}
+
+/// Handle [`Enter`][Kind::Enter]:[`Label`][Name::Label].
+fn on_enter_label(context: &mut CompileContext) {
+    if !label_streams_into_alt(context) {
+        context.buffer();
+    }
+}
+
 /// Handle [`Exit`][Kind::Exit]:[`Label`][Name::Label].
 fn on_exit_label(context: &mut CompileContext) {
-    let buf = context.resume();
-    context.media_stack.last_mut().unwrap().label = Some(buf);
+    let label = if label_streams_into_alt(context) {
+        String::new()
+    } else {
+        context.resume()
+    };
+    context.media_stack.last_mut().unwrap().label = Some(label);
 }
 
 /// Handle [`Exit`][Kind::Exit]:[`LabelText`][Name::LabelText].
 fn on_exit_label_text(context: &mut CompileContext) {
-    context.media_stack.last_mut().unwrap().label_id =
-        Some(Position::from_exit_event(context.events, context.index).to_indices());
+    context.media_stack.last_mut().unwrap().label_text_exit = Some(context.index);
+}
+
+/// Indices of the label text that exits at `label_text_exit`, if any.
+fn label_id(context: &CompileContext, label_text_exit: Option<usize>) -> Option<(usize, usize)> {
+    label_text_exit.map(|exit| Position::from_exit_event(context.events, exit).to_indices())
 }
 
 /// Handle [`Exit`][Kind::Exit]:[`LineEnding`][Name::LineEnding].
@@ -1421,23 +1461,24 @@ fn on_exit_media(context: &mut CompileContext) {
 
     let media = context.media_stack.pop().unwrap();
     let label = media.label.unwrap();
-    let id = media.reference_id.or(media.label_id).map(|indices| {
-        normalize_identifier(Slice::from_indices(context.bytes, indices.0, indices.1).as_str())
-    });
 
     let definition_index = if media.destination.is_none() {
+        let label_text_exit = media.label_text_exit;
+        let id = media
+            .reference_id
+            .or_else(|| label_id(context, label_text_exit))
+            .map(|indices| {
+                normalize_identifier(
+                    Slice::from_indices(context.bytes, indices.0, indices.1).as_str(),
+                )
+            });
         id.map(|id| {
-            let mut index = 0;
-
-            while index < context.definitions.len() && context.definitions[index].id != id {
-                index += 1;
-            }
-
-            debug_assert!(
-                index < context.definitions.len(),
-                "expected defined definition"
-            );
-            index
+            // Past the end when missing, which is only used out of image alts.
+            let found = context
+                .definitions
+                .binary_search_by(|definition| definition.id.as_str().cmp(&id));
+            debug_assert!(found.is_ok(), "expected defined definition");
+            found.unwrap_or(context.definitions.len())
         })
     } else {
         None
@@ -1592,6 +1633,14 @@ fn generate_footnote_section(context: &mut CompileContext) {
     context.line_ending();
     context.push("<ol>");
 
+    // Sorted by identifier, first definition first, for binary search.
+    context
+        .gfm_footnote_definitions
+        .sort_by(|left, right| left.0.cmp(&right.0));
+    context
+        .gfm_footnote_definitions
+        .dedup_by(|right, left| left.0 == right.0);
+
     let mut index = 0;
     while index < context.gfm_footnote_definition_calls.len() {
         generate_footnote_item(context, index);
@@ -1611,19 +1660,10 @@ fn generate_footnote_item(context: &mut CompileContext, index: usize) {
     let safe_id = sanitize(&id.to_lowercase());
 
     // Find definition: we’ll always find it.
-    let mut definition_index = 0;
-    while definition_index < context.gfm_footnote_definitions.len() {
-        if &context.gfm_footnote_definitions[definition_index].0 == id {
-            break;
-        }
-        definition_index += 1;
-    }
-
-    debug_assert_ne!(
-        definition_index,
-        context.gfm_footnote_definitions.len(),
-        "expected definition"
-    );
+    let definition_index = context
+        .gfm_footnote_definitions
+        .binary_search_by(|definition| definition.0.as_str().cmp(id))
+        .expect("expected definition");
 
     context.line_ending();
     context.push("<li id=\"");
@@ -1714,18 +1754,10 @@ fn generate_autolink(
     value: &str,
     is_gfm_literal: bool,
 ) {
-    let mut is_in_link = false;
-    let mut index = 0;
+    let is_link = !context.image_alt_inside
+        && (!is_gfm_literal || context.media_stack.iter().all(|media| media.image));
 
-    while index < context.media_stack.len() {
-        if !context.media_stack[index].image {
-            is_in_link = true;
-            break;
-        }
-        index += 1;
-    }
-
-    if !context.image_alt_inside && (!is_in_link || !is_gfm_literal) {
+    if is_link {
         context.push("<a href=\"");
         let url = if let Some(protocol) = protocol {
             format!("{}{}", protocol, value)
@@ -1745,7 +1777,7 @@ fn generate_autolink(
 
     context.push(&encode(value, context.encode_html));
 
-    if !context.image_alt_inside && (!is_in_link || !is_gfm_literal) {
+    if is_link {
         context.push("</a>");
     }
 }

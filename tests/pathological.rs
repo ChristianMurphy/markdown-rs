@@ -121,3 +121,74 @@ fn pathological_attention() {
         commonmark,
     );
 }
+
+#[test]
+fn pathological_containers_and_trees() {
+    let commonmark = ParseOptions::default;
+
+    assert_near_linear(
+        "deep list",
+        |n| format!("{}a", "- ".repeat(n)),
+        250,
+        commonmark,
+    );
+    assert_near_linear(
+        "deep list with an indented line",
+        |n| format!("{}a\n{}b", "- ".repeat(n), "  ".repeat(n)),
+        250,
+        commonmark,
+    );
+    assert_near_linear(
+        "deep list with blank lines",
+        |n| format!("{}x{}", "- ".repeat(n), "\n".repeat(n)),
+        250,
+        commonmark,
+    );
+    assert_near_linear(
+        "staircase list",
+        |n| {
+            (0..n)
+                .map(|depth| format!("{}* a\n", "  ".repeat(depth)))
+                .collect()
+        },
+        60,
+        commonmark,
+    );
+    assert_near_linear(
+        "deep block quote",
+        |n| format!("{}a", "> ".repeat(n)),
+        500,
+        commonmark,
+    );
+    assert_near_linear(
+        "one strong run",
+        |n| format!("{}a{}", "*".repeat(n), "*".repeat(n)),
+        500,
+        commonmark,
+    );
+}
+
+#[test]
+fn pathological_deep_to_string() {
+    thread::Builder::new()
+        .stack_size(1 << 28)
+        .spawn(|| {
+            let value = format!("{}a", "> ".repeat(20_000));
+            let tree = to_mdast(&value, &ParseOptions::default()).unwrap();
+            // Too small for a frame per level.
+            let (tree, value) = thread::Builder::new()
+                .stack_size(1 << 16)
+                .spawn(move || {
+                    let value = tree.to_string();
+                    (tree, value)
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            assert_eq!(value, "a", "should support `ToString` on deep trees");
+            drop(tree);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
