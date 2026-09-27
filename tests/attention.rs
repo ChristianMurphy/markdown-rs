@@ -475,6 +475,18 @@ fn attention() -> Result<(), message::Message> {
         "should not support empty strong emphasis"
     );
 
+    assert_eq!(
+        to_html("***123****456*"),
+        "<p><em><strong>123</strong></em><em>456</em></p>",
+        "should apply the rule of 3 to whole delimiter runs (1)"
+    );
+
+    assert_eq!(
+        to_html("a****b c** d*  e**"),
+        "<p>a***<em>b c** d</em>  e**</p>",
+        "should apply the rule of 3 to whole delimiter runs (2)"
+    );
+
     // Rule 10.
     assert_eq!(
         to_html("**foo [bar](/url)**"),
