@@ -507,5 +507,25 @@ to_html_with_options("<x> a", &danger)?,
         "should not support comments without a closer"
     );
 
+    assert_eq!(
+        to_html_with_options(
+            "a<b>",
+            &Options {
+                parse: ParseOptions {
+                    constructs: Constructs {
+                        autolink: false,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                compile: CompileOptions {
+                    allow_dangerous_html: true,
+                    ..Default::default()
+                }
+            }
+        )?,
+        "<p>a<b></p>",
+        "should support HTML (text) with autolinks turned off"
+    );
     Ok(())
 }
