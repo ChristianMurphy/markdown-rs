@@ -1,0 +1,28 @@
+[package]
+name = "markdown-performance"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Measurement harness for markdown-rs: corpus bins, scaling families, and differential checks against 1.0.0"
+
+[dependencies]
+markdown = { path = ".." }
+markdown-baseline = { package = "markdown", version = "=1.0.0" }
+
+[features]
+memchr = ["markdown/memchr"]
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "corpus"
+harness = false
+
+[profile.release]
+debug = "line-tables-only"
+
+[profile.bench]
+debug = "line-tables-only"
+
+[workspace]

@@ -1,0 +1,3 @@
+# Valgrind cannot read symbols from some lld-linked layouts, so callgrind counts nothing.
+[build]
+rustflags = ["-C", "linker-features=-lld"]
