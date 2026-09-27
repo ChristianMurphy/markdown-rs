@@ -1,6 +1,7 @@
 use markdown::mdast;
 use markdown_processor::{hast, visit::visit_mut, Processor};
 use pretty_assertions::assert_eq;
+use std::borrow::Cow;
 
 /// Plugin that turns emphasis into a custom `shout` node.
 fn emphasis_to_shout(processor: &mut Processor) {
@@ -19,7 +20,7 @@ fn emphasis_to_shout(processor: &mut Processor) {
     });
 }
 
-fn element(tag_name: &str, children: Vec<hast::Node>) -> hast::Node {
+fn element(tag_name: impl Into<Cow<'static, str>>, children: Vec<hast::Node>) -> hast::Node {
     hast::Node::Element(hast::Element {
         tag_name: tag_name.into(),
         properties: vec![],
@@ -36,7 +37,7 @@ fn handler_turns_custom_node_into_hast() {
             .plugin(|processor: &mut Processor| {
                 processor.add_hast_handler("shout", |node, children| {
                     let level = node.attributes.get("level").unwrap();
-                    vec![element(&["h", level].concat(), children)]
+                    vec![element(["h", level].concat(), children)]
                 });
             });
 

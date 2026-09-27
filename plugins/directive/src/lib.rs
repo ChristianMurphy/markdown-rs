@@ -63,7 +63,11 @@ impl Plugin for Directives {
 }
 
 /// Element for a directive: sanitized attributes, the name as a class.
-fn to_hast(node: &mdast::Custom, tag_name: &str, children: Vec<hast::Node>) -> Vec<hast::Node> {
+fn to_hast(
+    node: &mdast::Custom,
+    tag_name: &'static str,
+    children: Vec<hast::Node>,
+) -> Vec<hast::Node> {
     let mut class = node.fields.get("name").cloned().unwrap_or_default();
     let mut properties = vec![];
     for (key, value) in &node.attributes {
@@ -74,10 +78,16 @@ fn to_hast(node: &mdast::Custom, tag_name: &str, children: Vec<hast::Node>) -> V
             }
             // Never event handlers or URLs: they come from the author.
             "id" | "title" | "lang" | "dir" => {
-                properties.push((key.clone(), hast::PropertyValue::String(value.clone())));
+                properties.push((
+                    key.clone().into(),
+                    hast::PropertyValue::String(value.clone()),
+                ));
             }
             _ if key.starts_with("data-") => {
-                properties.push((key.clone(), hast::PropertyValue::String(value.clone())));
+                properties.push((
+                    key.clone().into(),
+                    hast::PropertyValue::String(value.clone()),
+                ));
             }
             _ => {}
         }

@@ -4,8 +4,8 @@
 //! ` />`, and `&`, `<`, `>`, `"` are encoded), so both paths can be compared.
 
 use crate::hast;
-use alloc::string::String;
-use markdown::{sanitize_with_protocols, SAFE_PROTOCOL_HREF, SAFE_PROTOCOL_SRC};
+use alloc::{borrow::Cow, string::String};
+use markdown::{SAFE_PROTOCOL_HREF, SAFE_PROTOCOL_SRC};
 
 /// HTML void elements: they have no closing tag.
 const VOIDS: [&str; 13] = [
@@ -42,29 +42,32 @@ fn one(node: &hast::Node, out: &mut String, options: &Options) {
             out.push('<');
             out.push_str(&element.tag_name);
             for (name, value) in &element.properties {
-                let value = match value {
+                let value: Cow<str> = match value {
                     hast::PropertyValue::Boolean(false) => continue,
-                    hast::PropertyValue::Boolean(true) => String::new(),
-                    hast::PropertyValue::String(x) => x.clone(),
-                    hast::PropertyValue::CommaSeparated(x) => x.join(", "),
-                    hast::PropertyValue::SpaceSeparated(x) => x.join(" "),
+                    hast::PropertyValue::Boolean(true) => "".into(),
+                    hast::PropertyValue::String(x) => x.as_str().into(),
+                    hast::PropertyValue::CommaSeparated(x) => x.join(", ").into(),
+                    hast::PropertyValue::SpaceSeparated(x) => x.join(" ").into(),
                 };
                 out.push(' ');
                 attribute_name(name, out);
                 out.push_str("=\"");
-                match name.as_str() {
-                    // `sanitize_with_protocols` also encodes.
+                match name.as_ref() {
                     "href" if !options.allow_dangerous_protocol => {
-                        out.push_str(&sanitize_with_protocols(&value, &SAFE_PROTOCOL_HREF));
+                        if has_safe_protocol(&value, &SAFE_PROTOCOL_HREF) {
+                            encode(&value, out);
+                        }
                     }
                     "src" if !options.allow_dangerous_protocol => {
-                        out.push_str(&sanitize_with_protocols(&value, &SAFE_PROTOCOL_SRC));
+                        if has_safe_protocol(&value, &SAFE_PROTOCOL_SRC) {
+                            encode(&value, out);
+                        }
                     }
                     _ => encode(&value, out),
                 }
                 out.push('"');
             }
-            if VOIDS.contains(&element.tag_name.as_str()) {
+            if VOIDS.contains(&element.tag_name.as_ref()) {
                 out.push_str(" />");
                 return;
             }
@@ -137,14 +140,34 @@ fn attribute_name(name: &str, out: &mut String) {
 
 /// Encode `&`, `<`, `>`, `"`, and NUL, like `markdown::to_html` does.
 fn encode(value: &str, out: &mut String) {
-    for char in value.chars() {
-        match char {
-            '\0' => out.push(char::REPLACEMENT_CHARACTER),
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(char),
+    let mut start = 0;
+    for (index, byte) in value.bytes().enumerate() {
+        let replacement = match byte {
+            b'\0' => "\u{FFFD}",
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            _ => continue,
+        };
+        out.push_str(&value[start..index]);
+        out.push_str(replacement);
+        start = index + 1;
+    }
+    out.push_str(&value[start..]);
+}
+
+/// Whether a URL has no protocol, or one in `protocols`: the check of
+/// `markdown::sanitize_with_protocols`, without normalizing again.
+fn has_safe_protocol(value: &str, protocols: &[&str]) -> bool {
+    let end = value.find(|char| matches!(char, '?' | '#' | '/'));
+    match value.find(':') {
+        Some(colon) if end.map_or(true, |end| colon < end) => {
+            let protocol = &value[..colon];
+            protocols
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(protocol))
         }
+        _ => true,
     }
 }

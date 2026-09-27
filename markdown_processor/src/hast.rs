@@ -4,7 +4,7 @@
 //!
 //! [hast]: https://github.com/syntax-tree/hast
 
-use alloc::{string::String, vec::Vec};
+use alloc::{borrow::Cow, string::String, vec::Vec};
 use markdown::unist::Position;
 
 /// Nodes.
@@ -76,9 +76,9 @@ pub struct Root {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Element {
     /// Tag name.
-    pub tag_name: String,
+    pub tag_name: Cow<'static, str>,
     /// Properties, keyed by hast property name (such as `className`).
-    pub properties: Vec<(String, PropertyValue)>,
+    pub properties: Vec<(Cow<'static, str>, PropertyValue)>,
     /// Children.
     pub children: Vec<Node>,
     /// Positional info.
@@ -128,7 +128,7 @@ pub struct Comment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text {
     /// Content model.
-    pub value: String,
+    pub value: Cow<'static, str>,
     /// Positional info.
     pub position: Option<Position>,
 }

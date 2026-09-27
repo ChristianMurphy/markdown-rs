@@ -12,7 +12,7 @@ A prototype on branch `feat/plugin-prototypes` shows that both kinds of plugin w
 - Tree transforms: plugins edit mdast (the markdown syntax tree) or hast (the HTML syntax tree) before the HTML is written.
 - Syntax extensions: a plugin adds a construct that runs as a state machine inside markdown-rs's own tokenizer, like a micromark construct. Constructs can be inline, block, or container syntax, and can have markdown inside them.
 
-With no plugins registered, markdown-rs costs +0.21% to +0.82% instructions against 1.0.0.
+With no plugins registered, markdown-rs costs +0.26% to +0.98% instructions against 1.0.0.
 
 Five plugins exercise the design. Each is its own crate that uses only public APIs:
 - `gfm_alert` turns GitHub alert block quotes (`> [!NOTE]`) into alert boxes. It is a transform plugin.
@@ -172,7 +172,7 @@ In all 7 remaining examples, the mdast from `to_mdast` is already wrong:
 
 ### Instruction counts
 
-Callgrind counted instructions inside one call. Wall-clock benchmarks were discarded, because the machine's load average was about 15 on 12 cores.
+Callgrind counted instructions inside one call, in builds with one codegen unit: with the default profile, partitioning alone moves counts by about 1.5%. Wall-clock benchmarks were discarded, because the machine's load average was about 15 on 12 cores.
 
 The documents:
 - tiny: 13 bytes.
@@ -183,14 +183,14 @@ With no plugins registered, against 1.0.0:
 
 | Document | Function | 1.0.0 | Prototype |
 | --- | --- | --- | --- |
-| tiny | `to_html` | 102,491 | +0.82% |
-| tiny | `to_mdast` | 106,475 | +0.38% |
-| small | `to_html` | 1,734,079 | +0.59% |
-| small | `to_mdast` | 1,783,824 | +0.45% |
-| `readme.md` | `to_html` | 18,991,149 | +0.40% |
-| `readme.md` | `to_mdast` | 19,361,314 | +0.21% |
+| tiny | `to_html` | 98,776 | +0.95% |
+| tiny | `to_mdast` | 102,769 | +0.46% |
+| small | `to_html` | 1,606,442 | +0.79% |
+| small | `to_mdast` | 1,653,437 | +0.56% |
+| `readme.md` | `to_html` | 17,629,499 | +0.54% |
+| `readme.md` | `to_mdast` | 17,967,845 | +0.26% |
 
-The table shows CommonMark options. GFM options give the same picture.
+The table shows CommonMark options. GFM options give +0.41% to +0.98%.
 
 The first version cost +7% to +15%. These changes brought it down:
 
@@ -203,7 +203,7 @@ The first version cost +7% to +15%. These changes brought it down:
 
 Other costs:
 - A registered construct that never matches adds +0.3% to +1.6%.
-- The tree path, through the `Processor`, costs +9.2% to +13.0% over `to_html` on the same document. That is the price of building mdast and hast.
+- The tree path, through the `Processor`, costs +7.0% to +11.9% over `to_html` on the same document. That is the price of converting mdast to hast, writing HTML from hast, and freeing both trees, since building mdast costs about the same as `to_html`.
 - `mdast::Node` is 176 bytes against 152, because `Custom` is the largest variant. Boxing it measured slower in `to_mdast`.
 
 ### Fidelity to micromark-extension-directive

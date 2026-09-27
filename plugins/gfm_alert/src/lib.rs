@@ -137,7 +137,7 @@ fn to_alert(node: &mut mdast::Node) -> Option<mdast::Node> {
 
 /// Create an element with classes.
 fn element(
-    tag_name: &str,
+    tag_name: &'static str,
     class_names: Vec<String>,
     children: Vec<hast::Node>,
     position: Option<Position>,

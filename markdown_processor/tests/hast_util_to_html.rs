@@ -5,8 +5,8 @@ use markdown_processor::{
 use pretty_assertions::assert_eq;
 
 fn element(
-    tag_name: &str,
-    properties: Vec<(&str, hast::PropertyValue)>,
+    tag_name: &'static str,
+    properties: Vec<(&'static str, hast::PropertyValue)>,
     children: Vec<hast::Node>,
 ) -> hast::Node {
     hast::Node::Element(hast::Element {
@@ -17,7 +17,7 @@ fn element(
     })
 }
 
-fn text(value: &str) -> hast::Node {
+fn text(value: &'static str) -> hast::Node {
     hast::Node::Text(hast::Text {
         value: value.into(),
         position: None,
@@ -145,6 +145,52 @@ fn keeps_comment_edges_from_closing_the_comment() {
             expected,
             "should escape {:?}",
             value
+        );
+    }
+}
+
+#[test]
+fn replaces_nul_and_keeps_other_characters() {
+    assert_eq!(
+        hast_util_to_html(&text("é\0🦀&"), &Options::default()),
+        "é\u{FFFD}🦀&amp;",
+        "should replace NUL, and keep other characters"
+    );
+}
+
+#[test]
+fn writes_urls_as_given_but_checks_their_protocol() {
+    let link = |href: &'static str| {
+        element(
+            "a",
+            vec![("href", hast::PropertyValue::String(href.into()))],
+            vec![],
+        )
+    };
+
+    assert_eq!(
+        hast_util_to_html(&link("a b/é?c=1&d"), &Options::default()),
+        "<a href=\"a b/é?c=1&amp;d\"></a>",
+        "should encode a URL without normalizing it again"
+    );
+    for href in ["HTTPS://a", "a/b:c", "?a:b", "#a:b", "/wiki/Help:Contents"] {
+        assert_eq!(
+            hast_util_to_html(&link(href), &Options::default()),
+            format!("<a href=\"{}\"></a>", href),
+            "should keep a safe protocol, or a colon after `/`, `?`, or `#`: {:?}",
+            href
+        );
+    }
+    for href in [
+        " javascript:alert(1)",
+        "java\tscript:alert(1)",
+        "JAVASCRIPT:alert(1)",
+    ] {
+        assert_eq!(
+            hast_util_to_html(&link(href), &Options::default()),
+            "<a href=\"\"></a>",
+            "should drop an unsafe protocol in a URL that a transform added: {:?}",
+            href
         );
     }
 }

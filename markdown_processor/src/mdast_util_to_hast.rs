@@ -192,7 +192,7 @@ pub fn mdast_util_to_hast_with_handlers(mdast: &mdast::Node, handlers: &Handlers
                         tag_name: "sup".into(),
                         properties: vec![],
                         children: vec![hast::Node::Text(hast::Text {
-                            value: (reference_index + 1).to_string(),
+                            value: (reference_index + 1).to_string().into(),
                             position: None,
                         })],
                         position: None,
@@ -241,7 +241,7 @@ pub fn mdast_util_to_hast_with_handlers(mdast: &mdast::Node, handlers: &Handlers
             if let Some(hast::Node::Element(tail_element)) = content.last_mut() {
                 if tail_element.tag_name == "p" {
                     if let Some(hast::Node::Text(text)) = tail_element.children.last_mut() {
-                        text.value.push(' ');
+                        text.value.to_mut().push(' ');
                     } else {
                         tail_element.children.push(hast::Node::Text(hast::Text {
                             value: " ".into(),
@@ -433,7 +433,7 @@ fn transform_code(_state: &mut State, _node: &mdast::Node, code: &mdast::Code) -
             tag_name: "code".into(),
             properties,
             children: vec![hast::Node::Text(hast::Text {
-                value,
+                value: value.into(),
                 position: None,
             })],
             position: code.position.clone(),
@@ -454,7 +454,7 @@ fn transform_custom(state: &mut State, node: &mdast::Node, custom: &mdast::Custo
         Result::Fragment(handler(custom, children))
     } else if let Some(value) = &custom.value {
         Result::Node(hast::Node::Text(hast::Text {
-            value: value.clone(),
+            value: value.clone().into(),
             position: custom.position.clone(),
         }))
     } else {
@@ -559,7 +559,7 @@ fn transform_footnote_reference(
                 ),
             ],
             children: vec![hast::Node::Text(hast::Text {
-                value: (call_index + 1).to_string(),
+                value: (call_index + 1).to_string().into(),
                 position: None,
             })],
             position: None,
@@ -571,7 +571,7 @@ fn transform_footnote_reference(
 /// [`Heading`][mdast::Heading].
 fn transform_heading(state: &mut State, node: &mdast::Node, heading: &mdast::Heading) -> Result {
     Result::Node(hast::Node::Element(hast::Element {
-        tag_name: format!("h{}", heading.depth),
+        tag_name: format!("h{}", heading.depth).into(),
         properties: vec![],
         children: all(state, node),
         position: heading.position.clone(),
@@ -649,7 +649,7 @@ fn transform_inline_code(
         tag_name: "code".into(),
         properties: vec![],
         children: vec![hast::Node::Text(hast::Text {
-            value: replace_eols_with_spaces(&inline_code.value),
+            value: replace_eols_with_spaces(&inline_code.value).into(),
             position: None,
         })],
         position: inline_code.position.clone(),
@@ -669,7 +669,7 @@ fn transform_inline_math(
             hast::PropertyValue::SpaceSeparated(vec!["language-math".into(), "math-inline".into()]),
         )],
         children: vec![hast::Node::Text(hast::Text {
-            value: replace_eols_with_spaces(&inline_math.value),
+            value: replace_eols_with_spaces(&inline_math.value).into(),
             position: None,
         })],
         position: inline_math.position.clone(),
@@ -917,7 +917,7 @@ fn transform_math(_state: &mut State, _node: &mdast::Node, math: &mdast::Math) -
                 ]),
             )],
             children: vec![hast::Node::Text(hast::Text {
-                value,
+                value: value.into(),
                 position: None,
             })],
             position: math.position.clone(),
@@ -1097,7 +1097,7 @@ fn transform_table(state: &mut State, _node: &mdast::Node, table: &mdast::Table)
 /// [`Text`][mdast::Text].
 fn transform_text(_state: &mut State, _node: &mdast::Node, text: &mdast::Text) -> Result {
     Result::Node(hast::Node::Text(hast::Text {
-        value: text.value.clone(),
+        value: text.value.clone().into(),
         position: text.position.clone(),
     }))
 }

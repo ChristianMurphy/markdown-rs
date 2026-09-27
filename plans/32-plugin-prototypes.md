@@ -424,6 +424,27 @@ Terms used below:
 - Revisit if: the remaining `to_html` cost matters. The per-event `is_extension` check could move into the existing `match` arms.
 - Transcript: Q31.
 
+### D45. Cost of the tree path
+
+- Question: the tree path cost 10% to 15% more instructions than `to_html`. Can that shrink without changing the mdast → hast → HTML design?
+- Evidence, from callgrind by stage:
+  - Building mdast costs about the same as `to_html`. The gap is converting mdast to hast, writing HTML from hast, and freeing both trees.
+  - About half of the conversion is `malloc`: 1,705 allocations for 757 hast nodes on `readme.md`.
+  - The serializer escaped one character at a time, cloned every attribute value, and normalized URLs a second time, though mdast → hast already normalizes them.
+- Alternatives:
+  - Serializer fixes, chosen: escape by scanning bytes, borrow attribute values, and check `href` and `src` protocols without normalizing again. No API change. A URL that a hast transform adds is escaped but not percent-encoded, as in `hast-util-to-html`, and D9's protocol check still applies.
+  - `Cow<'static, str>` for tag names, property names, and text values, chosen: constants such as `p`, `href`, and the line ending between blocks stop allocating. It changes the public hast types, away from mdxjs-rs's `String`.
+  - The protocol check as a local copy of the one in `markdown::sanitize_with_protocols`, chosen, rather than new public API in `markdown`.
+  - Taking the mdast by value, so text moves instead of being copied: about 278 of the remaining 1,104 allocations. Not done yet, as it is a larger refactor of the converter.
+  - An arena: slower on small documents, with more peak memory, as #227 found for `to_mdast`.
+  - Skipping hast when no plugin needs it: out of scope, since it changes the design.
+- Result, with one codegen unit, on `readme.md`: mdast → hast −15%, hast → HTML −57%, and freeing hast −28%.
+  - `Processor::process` costs +7.0% to +11.9% over `to_html`, down from +9.8% to +15.1%.
+  - The HTML is the same on the 652 CommonMark spec examples and `readme.md`, with dangerous protocols allowed and blocked.
+- Measurement note: codegen-unit partitioning alone moves default-profile counts by about 1.5%, so these runs set `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`.
+- Revisit if: the tree path's cost matters more. Taking the mdast by value comes next.
+- Transcript: Q35 to Q41.
+
 ## Clarifying questions and answers
 
 1. no_std boundary: "markdown-rs is #![no_std] + alloc and forbids unsafe code. A plugin API can keep those guarantees everywhere, or relax them for plugins that want std. Which boundary should the design hold?"
@@ -504,6 +525,20 @@ Assumptions stated at the pass 5 checkpoint:
     Answer: Separate local branch (Recommended), `fix/gfm-tagfilter-no-std`.
 34. Wrap-up: "What now?"
     Answer: Complete, unwind WIP (Recommended).
+35. Tree path: "Two changes shrink the tree path's overhead without changing the mdast → hast → HTML design … Which should go on feat/plugin-prototypes?"
+    Answer: Both (Recommended), the serializer fixes and `Cow` strings in hast.
+36. Plan: "… One assumption: the serializer's href/src protocol check becomes a local copy of the logic in markdown::sanitize_with_protocols, without the second normalization. Approve?"
+    Answer: Approve (Recommended).
+37. Spike shape: "The tree-path spike is on feat/plugin-prototypes … Proceed?"
+    Answer: Stabilize (Recommended).
+38. Review: "How should the code review of this diff run?"
+    Answer: Sub-agent (Recommended).
+39. Measuring: "What should the measurements for this change use?"
+    Answer: Re-measure both (Recommended), with one codegen unit, including the no-plugin costs posted on #32.
+40. Landing: "After review, how should this change land?"
+    Answer: New commit and push (Recommended).
+41. The #32 comment: "What should happen to the comment?"
+    Answer: Draft an edit (Recommended).
 
 ## Assumptions (override at approval)
 
@@ -646,6 +681,16 @@ Cross-cutting: this writes under `src/`, `tests/`, the root `Cargo.toml`, and ne
 6. Unresolved: ancestor access, `to_html` ignoring extensions, the `Custom` serde shape (`"type":"custom"` vs the unist `"type":"wikiLink"`), and `forbid(unsafe_code)` on the core crate.
 
 ## Review notes
+
+D45 review, quick tier plus correctness, sub-agent:
+- No critical findings. An equivalence harness over 10,454,981 inputs found that the new `encode` gives the old output and cannot panic. `has_safe_protocol` keeps and drops the same URLs as `sanitize_with_protocols`, and no URL it keeps parses to an unsafe scheme.
+- Fixed, advisory:
+  - Tests now check that safe URLs are kept: an uppercase protocol, and a colon after `/`, `?`, or `#`.
+  - The borrowed-strings test asserts each constant on its own.
+  - The NUL test puts multibyte characters before the replaced byte.
+  - The protocol doc no longer reads as a precondition.
+  - `eq_ignore_ascii_case` replaces a `to_lowercase` allocation per URL.
+- Deferred, advisory: `format!("h{}")` still allocates per heading. A lookup table would panic on a hand-built heading with a depth outside 1 to 6.
 
 Layer 1 review (processor), quick tier, sub-agent:
 - Fixed, critical: URLs were HTML-encoded twice, because the port used `sanitize`. The port now stores `normalize` output.
@@ -822,3 +867,8 @@ Pass 9 and wrap-up:
 - Follow-up to D25: text markers no longer allocate per parse without constructs. Final no-plugin cost against `main` is -0.56% to +1.31%. Its review was skipped, as the developer chose.
 - The `no_std` fix goes on a separate local branch, `fix/gfm-tagfilter-no-std`, created from `main`.
 - The WIP commits were unwound into staged changes on `feat/plugin-prototypes`, for the developer's own commits. Nothing was pushed or posted.
+
+D45, the cost of the tree path:
+- The serializer escapes by scanning bytes, borrows attribute values, and checks protocols without normalizing again. hast strings are `Cow<'static, str>`, and helpers in plugins and tests take `&'static str`.
+- Tests cover NUL, URLs written as given, safe and unsafe protocols, and borrowed constants. Each fails when its change is undone.
+- Verified: fmt, clippy, 98 test binaries, `no_std` builds, the same HTML as `2386fd5` on 653 inputs, and callgrind with one codegen unit.

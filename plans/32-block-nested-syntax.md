@@ -308,6 +308,7 @@ This follows micromark's `attentionMarkers` and GFM strikethrough:
 - Boxing `Custom` (question 20) shrinks `mdast::Node` to 152 bytes but slows `to_mdast` by up to 0.13%, so it was reverted too.
 - `mdast::Node` stays 176 bytes against 152 on 1.0.0, because `Custom`, now the largest variant, has `fields`.
 - The performance session’s differential found no difference from 1.0.0 over 1,001,467 inputs in 7 option sets.
+- With one codegen unit, the same bins measure +0.26% to +0.98%. The default profile’s partitioning alone moves counts by about 1.5% (D45).
 - The review fixes (D44) cost up to 0.10 points on the small and `readme.md` documents, and nothing on the tiny document:
   - The `divide_events` loop costs about 1,150 instructions on small `to_html`. Two other loop shapes measured worse, by 311 and 1,382.
   - The list item lookback in `to_html` costs 523 on small `to_html` and 3,470 on `readme.md`. Returning early without plugin tokens saved 152 and 1,111 of that; `#[inline]` on the helpers cost more.

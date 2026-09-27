@@ -57,7 +57,7 @@ fn to_hast(node: &mdast::Custom, children: Vec<hast::Node>) -> Vec<hast::Node> {
             title
         });
         vec![hast::Node::Text(hast::Text {
-            value: title,
+            value: title.into(),
             position: None,
         })]
     };
@@ -95,7 +95,11 @@ fn to_hast(node: &mdast::Custom, children: Vec<hast::Node>) -> Vec<hast::Node> {
     })]
 }
 
-fn element(tag_name: &str, class_names: Vec<String>, children: Vec<hast::Node>) -> hast::Element {
+fn element(
+    tag_name: &'static str,
+    class_names: Vec<String>,
+    children: Vec<hast::Node>,
+) -> hast::Element {
     let properties = if class_names.is_empty() {
         vec![]
     } else {
