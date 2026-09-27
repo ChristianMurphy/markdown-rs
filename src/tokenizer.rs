@@ -107,6 +107,17 @@ pub enum LabelKind {
     GfmUndefinedFootnote,
 }
 
+/// Marker runs seen while code (text) or math (text) looked for a closer.
+#[derive(Debug, Default)]
+pub struct RawTextRuns {
+    /// Start of the current look for a closer, while it records runs.
+    pub recording: Option<usize>,
+    /// All runs from this byte index to the end are in `last_start`.
+    pub complete_from: Option<usize>,
+    /// Per run size, sorted: the start of the last run seen of that size.
+    pub last_start: Vec<(usize, usize)>,
+}
+
 /// Label start, looking for an end.
 #[derive(Debug)]
 pub struct LabelStart {
@@ -114,11 +125,6 @@ pub struct LabelStart {
     pub kind: LabelKind,
     /// Indices of where the label starts and ends in `events`.
     pub start: (usize, usize),
-    /// A boolean used internally to figure out if a (link) label start can’t
-    /// be used anymore (because it would contain another link).
-    /// That link start is still looking for a balanced closing bracket though,
-    /// so we can’t remove it just yet.
-    pub inactive: bool,
 }
 
 /// Valid label.
@@ -228,6 +234,23 @@ pub struct TokenizeState<'a> {
     ///
     /// Used when tokenizing [text content][crate::construct::text].
     pub label_starts: Vec<LabelStart>,
+    /// Link starts below this index in `label_starts` are inactive; they stay
+    /// to balance brackets.
+    pub label_starts_inactive: usize,
+    /// Where the current HTML (text) starts.
+    pub html_text_start: usize,
+    /// Per HTML (text) kind with a closer: starts from here find none.
+    pub html_text_unclosed: [usize; 4],
+    /// Marker runs seen by code (text) and math (text), for `` ` `` and `$`.
+    pub raw_text_runs: [Option<Box<RawTextRuns>>; 2],
+    /// Start of the current trailing punctuation check of an autolink literal.
+    pub gfm_autolink_literal_trail_start: usize,
+    /// Last failed trailing punctuation check; checks starting in it fail too.
+    pub gfm_autolink_literal_trail_nok: Range<usize>,
+    /// Start of the current `www.` domain; `usize::MAX` for a protocol literal.
+    pub gfm_autolink_literal_www_start: usize,
+    /// Last invalid `www.` domain; domains starting in it are invalid too.
+    pub gfm_autolink_literal_www_nok: Range<usize>,
     /// List of unusable label starts.
     ///
     /// Used when tokenizing [text content][crate::construct::text].
@@ -368,6 +391,14 @@ impl<'a> Tokenizer<'a> {
                 mdx_last_parse_error: None,
                 end: 0,
                 label_starts: vec![],
+                label_starts_inactive: 0,
+                html_text_start: 0,
+                html_text_unclosed: [usize::MAX; 4],
+                raw_text_runs: [None, None],
+                gfm_autolink_literal_trail_start: 0,
+                gfm_autolink_literal_trail_nok: 0..0,
+                gfm_autolink_literal_www_start: usize::MAX,
+                gfm_autolink_literal_www_nok: 0..0,
                 label_starts_loose: vec![],
                 marker: 0,
                 marker_b: 0,

@@ -169,6 +169,77 @@ fn pathological_containers_and_trees() {
 }
 
 #[test]
+fn pathological_inline_scans() {
+    let commonmark = ParseOptions::default;
+
+    assert_near_linear(
+        "image and link starts",
+        |n| "![[]()".repeat(n),
+        1_000,
+        commonmark,
+    );
+    assert_near_linear(
+        "unclosed comments",
+        |n| format!("a {}", "<!--".repeat(n)),
+        1_000,
+        commonmark,
+    );
+    assert_near_linear(
+        "unclosed instructions",
+        |n| format!("a {}", "<?".repeat(n)),
+        1_000,
+        commonmark,
+    );
+    assert_near_linear(
+        "unclosed CDATA",
+        |n| format!("a {}", "<![CDATA[".repeat(n)),
+        1_000,
+        commonmark,
+    );
+    assert_near_linear(
+        "rising backtick runs",
+        |n| {
+            (1..=n)
+                .map(|size| format!("{} ", "`".repeat(size)))
+                .collect()
+        },
+        60,
+        commonmark,
+    );
+    assert_near_linear(
+        "escaped backticks",
+        |n| "\\`` ".repeat(n),
+        1_000,
+        commonmark,
+    );
+    assert_near_linear(
+        "unclosed declarations",
+        |n| format!("a {}", "<!A".repeat(n)),
+        1_000,
+        commonmark,
+    );
+}
+
+#[test]
+fn pathological_autolink_literals() {
+    let gfm = ParseOptions::gfm;
+
+    assert_near_linear("www after underscores", |n| "_www.".repeat(n), 1_000, gfm);
+    assert_near_linear(
+        "trailing punctuation",
+        |n| format!("http://a.b/{}x", "!".repeat(n)),
+        1_000,
+        gfm,
+    );
+    assert_near_linear(
+        "trailing underscores",
+        |n| format!("www.a{}b", "._".repeat(n)),
+        1_000,
+        gfm,
+    );
+}
+
+#[test]
 fn pathological_deep_to_string() {
     thread::Builder::new()
         .stack_size(1 << 28)

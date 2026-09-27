@@ -208,7 +208,8 @@ pub fn start(tokenizer: &mut Tokenizer) -> State {
     if Some(b']') == tokenizer.current && tokenizer.parse_state.options.constructs.label_end {
         // If there is an okay opening:
         if !tokenizer.tokenize_state.label_starts.is_empty() {
-            let label_start = tokenizer.tokenize_state.label_starts.last().unwrap();
+            let index = tokenizer.tokenize_state.label_starts.len() - 1;
+            let label_start = &tokenizer.tokenize_state.label_starts[index];
 
             tokenizer.tokenize_state.end = tokenizer.events.len();
 
@@ -221,7 +222,9 @@ pub fn start(tokenizer: &mut Tokenizer) -> State {
             // ```
             //
             // We can’t have that, so it’s just balanced brackets.
-            if label_start.inactive {
+            if label_start.kind != LabelKind::Image
+                && index < tokenizer.tokenize_state.label_starts_inactive
+            {
                 return State::Retry(StateName::LabelEndNok);
             }
 
@@ -366,17 +369,13 @@ pub fn ok(tokenizer: &mut Tokenizer) -> State {
     // If this is a link or footnote, we need to mark earlier link starts as no
     // longer viable for use (as they would otherwise contain a link).
     // These link starts are still looking for balanced closing brackets, so
-    // we can’t remove them, but we can mark them.
-    if label_start.kind != LabelKind::Image {
-        let mut index = 0;
-        while index < tokenizer.tokenize_state.label_starts.len() {
-            let label_start = &mut tokenizer.tokenize_state.label_starts[index];
-            if label_start.kind != LabelKind::Image {
-                label_start.inactive = true;
-            }
-            index += 1;
-        }
-    }
+    // we can’t remove them, but we can mark them: all at once.
+    let len = tokenizer.tokenize_state.label_starts.len();
+    tokenizer.tokenize_state.label_starts_inactive = if label_start.kind == LabelKind::Image {
+        tokenizer.tokenize_state.label_starts_inactive.min(len)
+    } else {
+        len
+    };
 
     tokenizer.tokenize_state.labels.push(Label {
         kind: label_start.kind,
@@ -386,19 +385,6 @@ pub fn ok(tokenizer: &mut Tokenizer) -> State {
     tokenizer.tokenize_state.end = 0;
     tokenizer.register_resolver_before(ResolveName::Label);
     State::Ok
-}
-
-/// Whether a label start was pushed after the one at event `start`.
-fn has_label_start_after(tokenizer: &Tokenizer, start: usize) -> bool {
-    let state = &tokenizer.tokenize_state;
-    state
-        .labels
-        .last()
-        .map_or(false, |label| label.start.0 > start)
-        || state
-            .label_starts_loose
-            .last()
-            .map_or(false, |loose| loose.start.0 > start)
 }
 
 /// Done, it’s nothing.
@@ -415,9 +401,25 @@ fn has_label_start_after(tokenizer: &Tokenizer, start: usize) -> bool {
 /// ```
 pub fn nok(tokenizer: &mut Tokenizer) -> State {
     let start = tokenizer.tokenize_state.label_starts.pop().unwrap();
+    let len = tokenizer.tokenize_state.label_starts.len();
+    tokenizer.tokenize_state.label_starts_inactive =
+        tokenizer.tokenize_state.label_starts_inactive.min(len);
     tokenizer.tokenize_state.label_starts_loose.push(start);
     tokenizer.tokenize_state.end = 0;
     State::Nok
+}
+
+/// Whether a label start was pushed after the one at event `start`.
+fn has_label_start_after(tokenizer: &Tokenizer, start: usize) -> bool {
+    let state = &tokenizer.tokenize_state;
+    state
+        .labels
+        .last()
+        .map_or(false, |label| label.start.0 > start)
+        || state
+            .label_starts_loose
+            .last()
+            .map_or(false, |loose| loose.start.0 > start)
 }
 
 /// At a resource.
@@ -707,6 +709,7 @@ pub fn resolve(tokenizer: &mut Tokenizer) -> Option<Subresult> {
     inject_labels(tokenizer, &labels);
     // Handle loose starts.
     let starts = tokenizer.tokenize_state.label_starts.split_off(0);
+    tokenizer.tokenize_state.label_starts_inactive = 0;
     mark_as_data(tokenizer, &starts);
     let starts = tokenizer.tokenize_state.label_starts_loose.split_off(0);
     mark_as_data(tokenizer, &starts);
