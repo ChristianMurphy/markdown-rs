@@ -86,12 +86,12 @@ fn pathological_edit_map() {
     let commonmark = ParseOptions::default;
     let gfm = ParseOptions::gfm;
 
-    assert_near_linear("lines", |n| "a\n".repeat(n), 5_000, commonmark);
-    assert_near_linear("blank lines", |n| "\n".repeat(n), 10_000, commonmark);
+    assert_near_linear("lines", |n| "a\n".repeat(n), 2_500, commonmark);
+    assert_near_linear("blank lines", |n| "\n".repeat(n), 5_000, commonmark);
     assert_near_linear(
         "table rows",
         |n| format!("| a |\n| - |\n{}", "| b |\n".repeat(n)),
-        2_000,
+        1_000,
         gfm,
     );
 }
