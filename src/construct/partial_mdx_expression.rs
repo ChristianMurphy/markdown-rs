@@ -60,7 +60,7 @@ use crate::event::Name;
 use crate::message;
 use crate::state::{Name as StateName, State};
 use crate::tokenizer::Tokenizer;
-use crate::util::mdx_collect::{collect_new, collected, reset_collect};
+use crate::util::mdx_collect::{charge_parse_budget, collect_new, collected, reset_collect};
 use crate::{MdxExpressionKind, MdxExpressionParse, MdxSignal};
 use alloc::boxed::Box;
 
@@ -111,7 +111,10 @@ pub fn before(tokenizer: &mut Tokenizer) -> State {
             {
                 parse_expression(tokenizer, parse)
             } else {
-                State::Ok
+                // At the opening brace.
+                let place = &tokenizer.events[tokenizer.tokenize_state.start - 1].point;
+                let len = tokenizer.point.index - place.index;
+                charge_parse_budget(tokenizer, len, place).unwrap_or(State::Ok)
             };
 
             if state == State::Ok {
@@ -220,7 +223,12 @@ pub fn prefix(tokenizer: &mut Tokenizer) -> State {
 fn parse_expression(tokenizer: &mut Tokenizer, parse: &MdxExpressionParse) -> State {
     // Collect the body of the expression and positional info for each run of it.
     collect_new(tokenizer, &[Name::MdxExpressionData, Name::LineEnding]);
+    // At the opening brace.
+    let place = &tokenizer.events[tokenizer.tokenize_state.start - 1].point;
     let result = collected(tokenizer);
+    if let Some(error) = charge_parse_budget(tokenizer, result.value.len(), place) {
+        return error;
+    }
 
     // Turn the name of the expression into a kind.
     let kind = match tokenizer.tokenize_state.token_1 {
