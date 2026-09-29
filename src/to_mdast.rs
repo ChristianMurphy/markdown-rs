@@ -297,13 +297,24 @@ fn enter(context: &mut CompileContext) -> Result<(), message::Message> {
                 return Ok(());
             }
         } else {
-            if top
+            if let Some((_, _, _, is_document)) = top
                 .contents
                 .get(top.content)
-                .map_or(false, |(_, enter, _)| *enter == index)
+                .filter(|(_, enter, _, _)| *enter == index)
             {
                 top.inside = true;
-                context.buffer();
+                if *is_document {
+                    context.trees.push((
+                        Node::Root(Root {
+                            children: vec![],
+                            position: None,
+                        }),
+                        vec![],
+                        vec![],
+                    ));
+                } else {
+                    context.buffer();
+                }
             }
             return Ok(());
         }
@@ -411,8 +422,8 @@ fn exit(context: &mut CompileContext) -> Result<(), message::Message> {
         if let Some(token) = top
             .contents
             .get(top.content)
-            .filter(|(_, _, exit)| *exit == index)
-            .map(|(token, _, _)| *token)
+            .filter(|(_, _, exit, _)| *exit == index)
+            .map(|(token, _, _, _)| *token)
         {
             top.inside = false;
             top.content += 1;
@@ -422,7 +433,9 @@ fn exit(context: &mut CompileContext) -> Result<(), message::Message> {
                 on_mismatch_error(context, Some(&events[index]), &events[*left])?;
             }
             let children = match context.resume() {
-                Node::Paragraph(Paragraph { children, .. }) => children,
+                Node::Paragraph(Paragraph { children, .. }) | Node::Root(Root { children, .. }) => {
+                    children
+                }
                 _ => unreachable!("expected buffer"),
             };
             context
@@ -1843,9 +1856,9 @@ struct ExtensionMatch<'a> {
     end: usize,
     /// Tokens of the match, in the order they were entered.
     tokens: Vec<Token<'a>>,
-    /// Content tokens: token index, and enter and exit event indices, in
-    /// order.
-    contents: Vec<(usize, usize, usize)>,
+    /// Content tokens: token index, enter and exit event indices, and
+    /// whether the content is a document, in order.
+    contents: Vec<(usize, usize, usize, bool)>,
     /// Index in `contents` of the next content token.
     content: usize,
     /// Whether the current event is inside content.

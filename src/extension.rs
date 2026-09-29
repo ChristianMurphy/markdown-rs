@@ -86,8 +86,8 @@ const STEP_MAX: usize = 256;
 /// Most attempts a construct can be in at once.
 const ATTEMPT_MAX: usize = 256;
 
-/// Most levels of content around content, built-in levels included: each
-/// level is parsed once more.
+/// Most passes over content, for documents first and then for text; content
+/// that needs a later pass does not match.
 const CONTENT_MAX: usize = 32;
 
 /// A construct, such as a mention.
@@ -111,8 +111,10 @@ const CONTENT_MAX: usize = 32;
 ///   first `exit` tokens that end there
 /// * in flow, an attempt does not consume a line ending
 /// * the first byte of a match is not content
-/// * every line of content has a byte other than a space or tab, like a
-///   paragraph
+/// * every line of text content has a byte other than a space or tab, like
+///   a paragraph
+/// * document content is in flow constructs only, and a line ending in it
+///   is content: a token in document content does not consume one
 /// * inside content, a token holds no content, and starts before the
 ///   content of its line, like a line prefix
 /// * `Ok` comes after at least one byte, with every token closed; in flow,
@@ -126,9 +128,12 @@ const CONTENT_MAX: usize = 32;
 /// container prefix counts a step for each of its bytes; past that, it does
 /// not match.
 /// Attempts nest at most 256 deep; a deeper attempt fails.
-/// Content nests at most 32 deep, counting the content of built-in
-/// constructs, such as the text of a paragraph; deeper content does not
-/// match.
+/// Content is parsed in at most 32 passes over the whole document: first
+/// the passes for document content, then one for each level of text content,
+/// the text of built-in constructs such as paragraphs included.
+/// Content that needs a later pass does not match, which past the first line
+/// of a flow construct is a parse error, so deep document content anywhere
+/// leaves fewer levels for text content.
 /// A failed construct is tried again at its next marker, so keep lookahead
 /// bounded, or parsing becomes quadratic.
 /// A flow construct decides on its first line: after it consumed a line
@@ -186,6 +191,8 @@ pub enum Step {
 pub enum ContentType {
     /// Phrasing, such as a label.
     Text,
+    /// Blocks, such as the body of a container (flow constructs only).
+    Document,
 }
 
 /// Token of a construct: a name, the text it spans, and where.
@@ -403,7 +410,17 @@ impl ConstructTokenizer<'_, '_> {
         let is_eol = self.tokenizer.current == Some(b'\n');
         let in_content = is_content_top(self.tokenizer);
 
-        if in_content && is_eol && ext(self.tokenizer).content_blank {
+        if in_content
+            && is_eol
+            && ext(self.tokenizer).content_blank
+            && content_of_top(self.tokenizer) == Content::Text
+        {
+            self.broken = true;
+            return;
+        }
+
+        // The line endings of a document go to the document.
+        if is_eol && !in_content && open_content(self.tokenizer) == Some(Content::Document) {
             self.broken = true;
             return;
         }
@@ -463,6 +480,7 @@ impl ConstructTokenizer<'_, '_> {
             name,
             Some(match content {
                 ContentType::Text => Content::Text,
+                ContentType::Document => Content::Document,
             }),
         );
     }
@@ -476,6 +494,7 @@ impl ConstructTokenizer<'_, '_> {
             )
         });
         let is_content = content.is_some();
+        let is_document_in_text = content == Some(Content::Document) && self.place == Place::Text;
         let kind = match content {
             Some(content) => TokenKind::Content(content),
             None if inside_content => TokenKind::InContent,
@@ -493,6 +512,7 @@ impl ConstructTokenizer<'_, '_> {
 
         if self.line_ending
             || (inside_content && is_content)
+            || is_document_in_text
             || !can_start
             || is_first_byte
             || is_too_deep
@@ -523,9 +543,13 @@ impl ConstructTokenizer<'_, '_> {
     pub fn exit(&mut self, name: &'static str) {
         let state = ext(self.tokenizer);
         let names = self.tokenizer.parse_state.extension_names.borrow();
-        let (is_named, is_content) = state.open.last().map_or((false, false), |id| {
+        let (is_named, content) = state.open.last().map_or((false, None), |id| {
             let (_, known, kind) = &names[usize::from(*id)];
-            (*known == name, matches!(kind, TokenKind::Content(_)))
+            let content = match kind {
+                TokenKind::Content(content) => Some(content.clone()),
+                _ => None,
+            };
+            (*known == name, content)
         });
         drop(names);
         // An attempt cannot close tokens opened before it.
@@ -549,12 +573,12 @@ impl ConstructTokenizer<'_, '_> {
         }
 
         if !self.top_is_empty() {
-            if is_content && ext(self.tokenizer).content_blank {
+            if content == Some(Content::Text) && ext(self.tokenizer).content_blank {
                 self.broken = true;
             } else {
                 exit_token(self.tokenizer);
             }
-        } else if is_content {
+        } else if content.is_some() {
             // Empty content is no content.
             self.tokenizer.events.pop();
             self.tokenizer.stack.pop();
@@ -639,6 +663,17 @@ fn is_content_top(tokenizer: &Tokenizer) -> bool {
             )
         }),
         _ => false,
+    }
+}
+
+/// Kind of content of the open content token, if any, maybe with tokens in
+/// it.
+fn open_content(tokenizer: &Tokenizer) -> Option<Content> {
+    let state = ext(tokenizer);
+    let id = *state.open.get(state.content_at)?;
+    match &tokenizer.parse_state.extension_names.borrow()[usize::from(id)].2 {
+        TokenKind::Content(content) => Some(content.clone()),
+        _ => None,
     }
 }
 
@@ -747,12 +782,6 @@ pub(crate) fn indent_after(tokenizer: &mut Tokenizer) -> State {
 /// Line endings in flow are real, so containers can count lines; in content,
 /// they are linked chunks.
 pub(crate) fn at_non_lazy(tokenizer: &mut Tokenizer) -> State {
-    // The end right after this line ending, the last byte, is like a lazy
-    // line.
-    if tokenizer.point.index + 1 == tokenizer.parse_state.bytes.len() {
-        return at_lazy(tokenizer);
-    }
-
     if is_content_top(tokenizer) {
         let content = content_of_top(tokenizer);
         if is_chunk_open(tokenizer) {
@@ -769,6 +798,25 @@ pub(crate) fn at_non_lazy(tokenizer: &mut Tokenizer) -> State {
     tokenizer.consume();
     tokenizer.exit(Name::LineEnding);
     State::Next(StateName::ExtensionStep)
+}
+
+/// At a flow line ending, in a check of whether the line after it continues
+/// the construct.
+pub(crate) fn line_ending(tokenizer: &mut Tokenizer) -> State {
+    tokenizer.enter(Name::LineEnding);
+    tokenizer.consume();
+    tokenizer.exit(Name::LineEnding);
+    State::Next(StateName::ExtensionLineAfter)
+}
+
+/// After a flow line ending, in a check: a lazy line or the end of what the
+/// tokenizer is fed does not continue the construct.
+pub(crate) fn line_after(tokenizer: &mut Tokenizer) -> State {
+    if tokenizer.current.is_none() || tokenizer.lazy {
+        State::Nok
+    } else {
+        State::Ok
+    }
 }
 
 /// After a flow line ending followed by a lazy line or the end.
@@ -842,7 +890,7 @@ pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
                     State::Next(StateName::ExtensionNonLazy),
                     State::Next(StateName::ExtensionLazy),
                 );
-                return State::Retry(StateName::NonLazyContinuationStart);
+                return State::Retry(StateName::ExtensionLineEnding);
             }
 
             State::Next(StateName::ExtensionStep)
@@ -969,8 +1017,9 @@ pub(crate) fn balanced_exit(events: &[Event], mut index: usize) -> usize {
 /// A match of a construct, as event indices.
 pub(crate) struct Match<'a> {
     pub tokens: Vec<Token<'a>>,
-    /// Content tokens: token, enter, and exit.
-    pub contents: Vec<(usize, usize, usize)>,
+    /// Content tokens: token, enter, and exit, and whether the content is a
+    /// document.
+    pub contents: Vec<(usize, usize, usize, bool)>,
     /// Events left out of values: content, and container prefixes.
     pub excluded: Vec<(usize, usize)>,
     /// Index of the last event of the match.
@@ -1003,10 +1052,10 @@ pub(crate) fn collect_tokens<'a>(
                 spans.push((name, index, index, is_content));
                 open.push(spans.len() - 1);
 
-                if is_content {
+                if let TokenKind::Content(content) = kind {
                     let enter = index;
                     index = balanced_exit(events, index);
-                    contents.push((spans.len() - 1, enter, index));
+                    contents.push((spans.len() - 1, enter, index, *content == Content::Document));
                     excluded.push((enter, index));
                     // Handle the exit.
                     continue;

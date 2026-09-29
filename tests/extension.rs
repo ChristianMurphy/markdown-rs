@@ -595,6 +595,20 @@ fn broken_constructs_leave_text() {
                 }
             },
         ),
+        ("document content in text", |state, tokenizer| match state {
+            0 => {
+                tokenizer.enter("a");
+                tokenizer.consume();
+                tokenizer.enter_content("b", ContentType::Document);
+                Step::Next(1)
+            }
+            _ => {
+                tokenizer.consume();
+                tokenizer.exit("b");
+                tokenizer.exit("a");
+                Step::Ok
+            }
+        }),
         // Its content, `{y`, does not match again: without the rule, the
         // construct matches.
         ("content at the first byte", |state, tokenizer| {
@@ -3146,4 +3160,456 @@ fn parses_flow_content_across_lines() {
             node.children
         );
     }
+}
+
+/// `:::`, a body parsed as a document, and `:::`, which is tried as an
+/// attempt at each line.
+fn container(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+    match (state, tokenizer.current()) {
+        (0, Some(b':')) => {
+            tokenizer.enter("container");
+            tokenizer.enter("containerFence");
+            tokenizer.consume();
+            Step::Next(1)
+        }
+        (1 | 2, Some(b':')) => {
+            tokenizer.consume();
+            Step::Next(state + 1)
+        }
+        (3, Some(b':')) => {
+            tokenizer.consume();
+            Step::Next(3)
+        }
+        (3, None | Some(b'\n')) => {
+            tokenizer.exit("containerFence");
+            Step::Retry(4)
+        }
+        (4, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(5)
+        }
+        (4 | 5, None) => {
+            tokenizer.exit("container");
+            Step::Ok
+        }
+        (5, Some(_)) => {
+            tokenizer.enter_content("containerContent", ContentType::Document);
+            Step::Retry(10)
+        }
+        (10, Some(_)) => Step::Attempt {
+            state: 20,
+            ok: 30,
+            nok: 11,
+        },
+        (10 | 11, None) => {
+            tokenizer.exit("containerContent");
+            tokenizer.exit("container");
+            Step::Ok
+        }
+        (11, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(10)
+        }
+        (11, Some(_)) => {
+            tokenizer.consume();
+            Step::Next(11)
+        }
+        (20, Some(b':')) => {
+            tokenizer.enter("containerFence");
+            tokenizer.consume();
+            Step::Next(21)
+        }
+        (21 | 22, Some(b':')) => {
+            tokenizer.consume();
+            Step::Next(state + 1)
+        }
+        (23, Some(b':')) => {
+            tokenizer.consume();
+            Step::Next(23)
+        }
+        (23, None | Some(b'\n')) => {
+            tokenizer.exit("containerFence");
+            Step::Ok
+        }
+        (30, _) => {
+            tokenizer.exit("containerContent");
+            tokenizer.exit("container");
+            Step::Ok
+        }
+        _ => Step::Nok,
+    }
+}
+
+fn container_body(input: &str) -> Vec<Node> {
+    let tree = to_mdast(input, &scripted_flow(b':', container)).unwrap();
+    find_scripted(&tree)
+        .expect("expected a match")
+        .children
+        .clone()
+}
+
+#[test]
+fn parses_a_body_as_a_document() {
+    assert!(
+        matches!(
+            &container_body(":::\n> *a*\n:::")[..],
+            [Node::Blockquote(_)]
+        ),
+        "should parse containers in the body"
+    );
+
+    let body = container_body("> :::\n> - a\n>\n>   b\n> :::");
+    assert!(
+        matches!(&body[..], [Node::List(list)] if matches!(&list.children[..], [Node::ListItem(item)] if item.spread && item.children.len() == 2)),
+        "should parse a spread list item in a body in a block quote, got {:?}",
+        body
+    );
+    assert_eq!(
+        body[0].children().unwrap()[0].children().unwrap()[0].position(),
+        Some(&Position::new(2, 5, 10, 2, 6, 11)),
+        "should start the first line of a body after its prefixes"
+    );
+
+    let tree = to_mdast(":::\na\n:::\nb", &scripted_flow(b':', container)).unwrap();
+    assert_eq!(
+        find_scripted(&tree).and_then(|node| node.fields.get("tokens").cloned()),
+        Some("container,containerFence,containerContent".into()),
+        "should not give tokens in content, such as the closing fence, to `to_mdast`"
+    );
+    assert!(
+        matches!(tree.children().unwrap().last(), Some(Node::Paragraph(_))),
+        "should end at the closing fence"
+    );
+}
+
+#[test]
+fn resolves_definitions_across_bodies() {
+    for input in [":::\n[x]: /u\n:::\n\n[x]", "[x]\n\n:::\n[x]: /u\n:::"] {
+        let tree = to_mdast(input, &scripted_flow(b':', container)).unwrap();
+        assert!(
+            format!("{:?}", tree).contains("LinkReference"),
+            "should resolve a reference with a definition in a body: {:?}",
+            input
+        );
+    }
+}
+
+#[test]
+fn ends_a_flow_construct_at_a_lazy_line_or_the_end() {
+    let tree = to_mdast("> :::\n> a\nb", &scripted_flow(b':', container)).unwrap();
+    assert!(
+        matches!(
+            &tree.children().unwrap()[..],
+            [Node::Blockquote(_), Node::Paragraph(_)]
+        ),
+        "should end before a lazy line, got {:?}",
+        tree
+    );
+
+    assert!(
+        matches!(&container_body(":::\na\n\n")[..], [Node::Paragraph(_)]),
+        "should run to the end without a closing fence"
+    );
+}
+
+/// `{` and `}` fences around a document whose lines can start with a two
+/// space prefix, a token in content.
+fn braced(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+    match (state, tokenizer.current()) {
+        (0, Some(b'{')) => {
+            tokenizer.enter("f");
+            tokenizer.enter("open");
+            tokenizer.consume();
+            tokenizer.exit("open");
+            Step::Next(1)
+        }
+        (1, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(2)
+        }
+        (2, _) => {
+            tokenizer.enter_content("body", ContentType::Document);
+            Step::Retry(3)
+        }
+        (3, None) => {
+            tokenizer.exit("body");
+            tokenizer.exit("f");
+            Step::Ok
+        }
+        (3, _) => Step::Attempt {
+            state: 10,
+            ok: 20,
+            nok: 4,
+        },
+        (4, Some(b' ')) => {
+            tokenizer.enter("prefix");
+            tokenizer.consume();
+            Step::Next(5)
+        }
+        (4, _) => Step::Retry(6),
+        (5, Some(b' ')) => {
+            tokenizer.consume();
+            tokenizer.exit("prefix");
+            Step::Next(6)
+        }
+        (5, _) => {
+            tokenizer.exit("prefix");
+            Step::Retry(6)
+        }
+        (6, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(3)
+        }
+        (6, None) => Step::Retry(3),
+        (6, Some(_)) => {
+            tokenizer.consume();
+            Step::Next(6)
+        }
+        (10, Some(b'}')) => {
+            tokenizer.enter("close");
+            tokenizer.consume();
+            tokenizer.exit("close");
+            Step::Next(11)
+        }
+        (11, None | Some(b'\n')) => Step::Ok,
+        (20, _) => {
+            tokenizer.exit("body");
+            tokenizer.exit("f");
+            Step::Ok
+        }
+        _ => Step::Nok,
+    }
+}
+
+#[test]
+fn leaves_prefixes_of_an_outer_match_out_of_an_inner_one() {
+    let tree = to_mdast("{\n  {\n  a\n  }\n}", &scripted_flow(b'{', braced)).unwrap();
+    let outer = find_scripted(&tree).expect("expected a match");
+    let inner = outer
+        .children
+        .iter()
+        .find_map(find_scripted)
+        .expect("expected a nested match");
+
+    assert_eq!(
+        (
+            inner.fields.get("tokens").map(String::as_str),
+            inner.value.as_deref()
+        ),
+        (Some("f,open,body"), Some("{\n")),
+        "should leave the prefix of the outer match out of the inner one"
+    );
+}
+
+#[test]
+fn allows_blank_lines_in_a_body() {
+    assert!(
+        matches!(
+            &container_body(":::\na\n\nb\n:::")[..],
+            [Node::Paragraph(_), Node::Paragraph(_)]
+        ),
+        "should parse blank lines in a document"
+    );
+}
+
+#[test]
+fn parses_an_indented_body_of_lines() {
+    let body = container_body("  :::\n  a\n  b\n:::");
+
+    assert!(
+        matches!(&body[..], [Node::Paragraph(_)]),
+        "should parse the lines of an indented body, got {:?}",
+        body
+    );
+    assert_eq!(body[0].to_string(), "a\nb");
+}
+
+/// `!` and a line ending, then lines with a `|` prefix, whose rest is a
+/// document; with `TAKE_EOL`, a prefix takes the line ending of a line that
+/// has nothing else.
+fn bars<const TAKE_EOL: bool>(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+    match (state, tokenizer.current()) {
+        (0, Some(b'!')) => {
+            tokenizer.enter("bars");
+            tokenizer.consume();
+            Step::Next(1)
+        }
+        (1, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(2)
+        }
+        (2, Some(b'|')) => {
+            if tokenizer.memory()[0] == 0 {
+                tokenizer.enter_content("barsBody", ContentType::Document);
+                tokenizer.memory()[0] = 1;
+            }
+            tokenizer.enter("barsPrefix");
+            tokenizer.consume();
+            Step::Next(3)
+        }
+        (3, Some(b'\n')) if TAKE_EOL => {
+            tokenizer.consume();
+            Step::Next(5)
+        }
+        (5, _) => {
+            tokenizer.exit("barsPrefix");
+            Step::Retry(2)
+        }
+        (3, _) => {
+            tokenizer.exit("barsPrefix");
+            Step::Retry(4)
+        }
+        (4, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(2)
+        }
+        (4, Some(_)) => {
+            tokenizer.consume();
+            Step::Next(4)
+        }
+        (2 | 4, None) => {
+            tokenizer.exit("barsBody");
+            tokenizer.exit("bars");
+            Step::Ok
+        }
+        _ => Step::Nok,
+    }
+}
+
+#[test]
+fn keeps_line_endings_of_a_body_in_the_body() {
+    let tree = to_mdast("!\n|a\n|\n|b", &scripted_flow(b'!', bars::<false>)).unwrap();
+    assert!(
+        matches!(
+            &find_scripted(&tree).expect("expected a match").children[..],
+            [Node::Paragraph(_), Node::Paragraph(_)]
+        ),
+        "should parse a line with only a prefix as a blank line"
+    );
+
+    assert_eq!(
+        to_mdast("!\n|a\n|\n|b", &scripted_flow(b'!', bars::<true>))
+            .unwrap_err()
+            .rule_id
+            .as_str(),
+        "flow-construct-late-failure",
+        "should break a construct whose token in a body takes a line ending"
+    );
+}
+
+#[test]
+fn writes_bodies_as_html() {
+    assert_eq!(
+        html("{\n[a]:\n b", scripted_flow(b'{', braced)),
+        "{\n",
+        "should skip prefixes in definitions in a body"
+    );
+    assert!(
+        html("- :::\n  a\n  :::", scripted_flow(b':', container)).contains("<p>a</p>"),
+        "should not make a body in a tight list tight"
+    );
+}
+
+#[test]
+fn ends_a_construct_at_the_end_of_a_body() {
+    let parse = ParseOptions {
+        flow_constructs: vec![
+            Box::new(Scripted {
+                marker: b':',
+                step: container,
+            }),
+            Box::new(Scripted {
+                marker: b'%',
+                step: fenced,
+            }),
+        ],
+        ..ParseOptions::default()
+    };
+    let tree = to_mdast(":::\n%%%\nx\n:::", &parse).unwrap();
+    let body = &find_scripted(&tree).expect("expected a match").children;
+
+    assert_eq!(
+        body.iter()
+            .find_map(find_scripted)
+            .and_then(|node| node.value.as_deref()),
+        Some("%%%\nx"),
+        "should end before the last line ending of a body, as at the end"
+    );
+}
+
+#[test]
+fn parses_more_in_bodies() {
+    assert!(
+        matches!(&container_body(":::\r\na\r\n:::")[..], [Node::Paragraph(paragraph)] if paragraph.children[0].to_string() == "a"),
+        "should support CR+LF"
+    );
+
+    let parse = ParseOptions {
+        constructs: markdown::Constructs::gfm(),
+        ..scripted_flow(b':', container)
+    };
+    let tree = to_mdast(":::\n[^a]: b\n:::\n\nc[^a]", &parse).unwrap();
+    assert!(
+        format!("{:?}", tree).contains("FootnoteReference"),
+        "should resolve a footnote with a definition in a body"
+    );
+
+    let late: StepFn = |state, tokenizer| match (state, tokenizer.current()) {
+        (0, Some(b'%')) => {
+            tokenizer.enter("late");
+            tokenizer.consume();
+            Step::Next(1)
+        }
+        (1, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(2)
+        }
+        (1, Some(_)) => {
+            tokenizer.consume();
+            Step::Next(1)
+        }
+        _ => Step::Nok,
+    };
+    let parse = ParseOptions {
+        flow_constructs: vec![
+            Box::new(Scripted {
+                marker: b':',
+                step: container,
+            }),
+            Box::new(Scripted {
+                marker: b'%',
+                step: late,
+            }),
+        ],
+        ..ParseOptions::default()
+    };
+    assert_eq!(
+        to_mdast(":::\n%a\nb\n:::", &parse)
+            .unwrap_err()
+            .rule_id
+            .as_str(),
+        "flow-construct-late-failure",
+        "should error for a late failure in a body"
+    );
+}
+
+#[test]
+fn limits_the_depth_of_bodies() {
+    let parse = |levels: usize| {
+        let mut input = String::new();
+        for level in 0..levels {
+            input.push_str(&format!("{}{{\n", "  ".repeat(level)));
+        }
+        input.push_str(&format!("{}a\n", "  ".repeat(levels)));
+        for level in (0..levels).rev() {
+            input.push_str(&format!("{}}}\n", "  ".repeat(level)));
+        }
+        to_mdast(&input, &scripted_flow(b'{', braced))
+    };
+    assert_eq!(depth(&parse(32).unwrap()), 32, "should nest bodies 32 deep");
+    assert_eq!(
+        parse(33).unwrap_err().rule_id.as_str(),
+        "flow-construct-late-failure",
+        "should fail a body deeper than that, which here is past the first line"
+    );
 }
