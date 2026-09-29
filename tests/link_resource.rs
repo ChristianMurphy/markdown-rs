@@ -454,6 +454,18 @@ fn link_resource() -> Result<(), message::Message> {
     );
 
     assert_eq!(
+        to_html("[a](b \"c  \nd\")"),
+        "<p><a href=\"b\" title=\"c  \nd\">a</a></p>",
+        "should keep whitespace before an eol in a title, without a hard break"
+    );
+
+    assert_eq!(
+        to_html("[a](b \"c\t\nd\")"),
+        "<p><a href=\"b\" title=\"c\t\nd\">a</a></p>",
+        "should keep a tab before an eol in a title"
+    );
+
+    assert_eq!(
         to_html("[a](b( \"c\")"),
         "<p>[a](b( &quot;c&quot;)</p>",
         "should not support whitespace when unbalanced in a raw destination"

@@ -60,6 +60,12 @@ fn definition() -> Result<(), message::Message> {
     );
 
     assert_eq!(
+        to_html("[a]: b \"c \nd\"\n\n[a]"),
+        "<p><a href=\"b\" title=\"c \nd\">a</a></p>",
+        "should keep whitespace before a line ending in titles"
+    );
+
+    assert_eq!(
         to_html("[foo]: /url 'title\n\nwith blank line'\n\n[foo]"),
         "<p>[foo]: /url 'title</p>\n<p>with blank line'</p>\n<p>[foo]</p>",
         "should not support blank lines in titles"

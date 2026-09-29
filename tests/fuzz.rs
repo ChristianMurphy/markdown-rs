@@ -132,29 +132,19 @@ fn fuzz() -> Result<(), message::Message> {
     assert_eq!(
         to_html("[](a (a \n))"),
         "<p><a href=\"a\" title=\"a \n\"></a></p>",
-        "yy: link and title with newline (GH-79)"
+        "13-a: link and title with newline (GH-79)"
     );
 
-    // Additional shape variants of the same `subtokenize.rs:149` panic
-    // ("expected link"), found via fuzzing. All three reach the same
-    // chain-walker that calls `enter.link.as_ref().expect("expected link")`
-    // on an event whose `link` field is `None` (added by `attention.rs`
-    // without a `Link` payload).
-
-    assert!(
-        matches!(
-            to_html_with_options("[x](/x \"> \n\")", &Options::default()),
-            Ok(_)
-        ),
-        "yy: link with quoted title containing `> ` and newline (GH-79 variant)"
+    assert_eq!(
+        to_html("[x](/x \"> \n\")"),
+        "<p><a href=\"/x\" title=\"&gt; \n\">x</a></p>",
+        "13-b: link title with a space before a line ending (GH-207, GH-211)"
     );
 
-    assert!(
-        matches!(
-            to_html_with_options("[][a \n]\n\n[a ]:\0", &Options::default()),
-            Ok(_)
-        ),
-        "yy: collapsed-reference link with space-newline label and NUL url (GH-79 variant)"
+    assert_eq!(
+        to_html("[][a \n]\n\n[a ]:\0"),
+        "<p><a href=\"%EF%BF%BD\"></a></p>\n",
+        "13-c: reference label with a space before a line ending (GH-207, GH-209)"
     );
 
     Ok(())
