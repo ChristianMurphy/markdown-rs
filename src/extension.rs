@@ -64,9 +64,10 @@
 //! # Ok::<(), markdown::message::Message>(())
 //! ```
 
-use crate::event::{Event, Kind, Name};
+use crate::event::{Content, Event, Kind, Link, Name};
 use crate::mdast;
 use crate::state::{Name as StateName, State};
+use crate::subtokenize::link_to;
 use crate::tokenizer::{move_point_back, Tokenizer};
 use crate::unist::Position;
 use crate::util::slice::{Position as SlicePosition, Slice};
@@ -76,6 +77,10 @@ use core::{convert::TryFrom, str};
 
 /// Most steps a construct can take in a row without consuming a byte.
 const RETRY_MAX: u16 = 256;
+
+/// Most levels of content around content, built-in levels included: each
+/// level is parsed once more.
+const CONTENT_MAX: usize = 32;
 
 /// A construct, such as a mention.
 ///
@@ -88,14 +93,23 @@ const RETRY_MAX: u16 = 256;
 /// stay what they would otherwise be:
 ///
 /// * every consumed byte is inside a token, and one token holds the others
-/// * a token holds at least one byte
+/// * a token holds at least one byte; an empty content token is dropped
 /// * `exit` closes the innermost open token
 /// * `Next` comes after a `consume`, `Retry` does not
 /// * after consuming a line ending, a step returns `Next`, and can first
 ///   `exit` tokens that end there
+/// * the first byte of a match is not content
+/// * every line of content has a byte other than a space or tab, like a
+///   paragraph
+/// * inside content, a token holds no content, and starts before the
+///   content of its line, like a line prefix
 /// * `Ok` comes after at least one byte, with every token closed
-/// * tokens start and end between characters, not inside one
+/// * tokens start and end between characters, not inside one; a tab is one
+///   character, but a line can start inside it, after container prefixes
 ///
+/// Content nests at most 32 deep, counting the content of built-in
+/// constructs, such as the text of a paragraph; deeper content does not
+/// match.
 /// A failed construct is tried again at its next marker, so keep lookahead
 /// bounded, or parsing becomes quadratic.
 pub trait Construct {
@@ -133,21 +147,44 @@ pub enum Step {
     Nok,
 }
 
+/// Kind of markdown inside a content token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ContentType {
+    /// Phrasing, such as a label.
+    Text,
+}
+
 /// Token of a construct: a name, the text it spans, and where.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Token<'a> {
     /// Name given to `enter`.
     pub name: &'static str,
-    /// Source text, without container prefixes.
+    /// Source text, without container prefixes and content (empty for a
+    /// content token).
     pub value: Cow<'a, str>,
+    /// Content of a content token, parsed as markdown.
+    pub children: Vec<mdast::Node>,
     /// Positional info.
     pub position: Position,
 }
 
-/// Index of a construct and name of a token, interned per parse: events of
-/// constructs refer to it by index.
-pub(crate) type TokenName = (u8, &'static str);
+/// What an interned token name is.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TokenKind {
+    /// A token of the construct.
+    Token,
+    /// A token whose inside is parsed as markdown.
+    Content(Content),
+    /// A token of the construct inside a content token, such as a line
+    /// prefix: its bytes are not content, and compilers skip it.
+    InContent,
+}
+
+/// Index of a construct, name of a token, and what it is, interned per
+/// parse: events of constructs refer to it by index.
+pub(crate) type TokenName = (u8, &'static str, TokenKind);
 
 /// State of constructs in a tokenizer, boxed, so the tokenizer stays small
 /// without them.
@@ -169,6 +206,17 @@ pub(crate) struct ExtensionState {
     memory: [usize; 4],
     /// Interned names of the open tokens of the current match.
     open: Vec<u16>,
+    /// Whether to keep the initial and final whitespace of this text, which
+    /// is content of a construct, like micromark’s `_contentTypeTextTrailing`.
+    pub(crate) keep_whitespace: bool,
+    /// Index in `open` of the current content token, if it is open.
+    content_at: usize,
+    /// Line of the last byte of the open content, `0` if none.
+    content_line: usize,
+    /// Whether the current line of the open content has only spaces and tabs.
+    content_blank: bool,
+    /// Enter of the last chunk of the current content token.
+    last_chunk: Option<usize>,
 }
 
 /// State of constructs in `tokenizer`, to read, once one started.
@@ -211,11 +259,12 @@ impl ConstructTokenizer<'_, '_> {
     /// Current character, or `None` at the end or inside a character.
     ///
     /// Line endings are `'\n'`, as with [`current`][Self::current].
-    /// `consume` takes one byte: a character takes as many steps as it has
-    /// bytes.
+    /// `consume` takes one byte, or one column of a tab: a character takes
+    /// as many steps as it has bytes or columns.
     pub fn current_char(&self) -> Option<char> {
         match self.current() {
             Some(b'\n') => Some('\n'),
+            Some(_) if self.tokenizer.point.vs > 0 && !self.tokenizer.at_line_start() => None,
             Some(_) if self.tokenizer.point.vs > 0 => Some(' '),
             Some(0x80..=0xBF) | None => None,
             Some(_) => {
@@ -252,7 +301,32 @@ impl ConstructTokenizer<'_, '_> {
 
         let is_eol = self.tokenizer.current == Some(b'\n');
 
-        if is_eol {
+        if is_content_top(self.tokenizer) {
+            if is_eol && ext(self.tokenizer).content_blank {
+                self.broken = true;
+                return;
+            }
+
+            // Content goes into linked chunks, one per line, parsed later.
+            if !is_chunk_open(self.tokenizer) {
+                let content = content_of_top(self.tokenizer);
+                enter_chunk(self.tokenizer, content);
+                self.tokenizer.stack.pop();
+            }
+            let (line, is_blank) = (
+                self.tokenizer.point.line,
+                matches!(self.tokenizer.current, Some(b'\t' | b' ')),
+            );
+            let state = ext_mut(self.tokenizer);
+            state.content_line = line;
+            if !is_blank {
+                state.content_blank = is_eol;
+            }
+            self.tokenizer.consume();
+            if is_eol {
+                exit_chunk(self.tokenizer);
+            }
+        } else if is_eol {
             self.tokenizer.enter(Name::LineEnding);
             self.tokenizer.consume();
             self.tokenizer.exit(Name::LineEnding);
@@ -266,17 +340,72 @@ impl ConstructTokenizer<'_, '_> {
 
     /// Start a token.
     pub fn enter(&mut self, name: &'static str) {
+        self.enter_impl(name, None);
+    }
+
+    /// Start a token whose inside is parsed as markdown later, like
+    /// micromark’s `contentType`.
+    ///
+    /// Bytes consumed directly in it are content; tokens entered in it,
+    /// such as a line prefix or a closing fence, are not, and are not given
+    /// to [`Construct::to_mdast`].
+    pub fn enter_content(&mut self, name: &'static str, content: ContentType) {
+        self.enter_impl(
+            name,
+            Some(match content {
+                ContentType::Text => Content::Text,
+            }),
+        );
+    }
+
+    fn enter_impl(&mut self, name: &'static str, content: Option<Content>) {
         let state = ext(self.tokenizer);
+        let inside_content = state.open.get(state.content_at).map_or(false, |id| {
+            matches!(
+                self.tokenizer.parse_state.extension_names.borrow()[usize::from(*id)].2,
+                TokenKind::Content(_)
+            )
+        });
+        let is_content = content.is_some();
+        let kind = match content {
+            Some(content) => TokenKind::Content(content),
+            None if inside_content => TokenKind::InContent,
+            None => TokenKind::Token,
+        };
         // The first token starts the match, and holds the others.
         let can_start = self.tokenizer.events.len() == state.events || !state.open.is_empty();
+        // Content smaller than its match cannot match again forever.
+        let is_first_byte = is_content && self.tokenizer.point.index == state.start;
+        let is_too_deep = is_content && self.tokenizer.parse_state.content_depth >= CONTENT_MAX;
+        // A token in content comes before any content on its line, such as
+        // a line prefix: after content, it would split that content.
+        let is_after_content =
+            kind == TokenKind::InContent && state.content_line == self.tokenizer.point.line;
 
-        if self.line_ending || !can_start || !at_boundary(self.tokenizer) {
+        if self.line_ending
+            || (inside_content && is_content)
+            || !can_start
+            || is_first_byte
+            || is_too_deep
+            || is_after_content
+            || !at_boundary(self.tokenizer)
+        {
             self.broken = true;
             return;
         }
 
-        match intern(self.tokenizer, self.index, name) {
-            Some(id) => enter_token(self.tokenizer, id),
+        match intern(self.tokenizer, self.index, name, kind) {
+            Some(id) => {
+                let content_at = ext(self.tokenizer).open.len();
+                enter_token(self.tokenizer, id);
+                if is_content {
+                    let state = ext_mut(self.tokenizer);
+                    state.content_at = content_at;
+                    state.content_line = 0;
+                    state.content_blank = true;
+                    state.last_chunk = None;
+                }
+            }
             None => self.broken = true,
         }
     }
@@ -284,18 +413,38 @@ impl ConstructTokenizer<'_, '_> {
     /// End the innermost open token, which must be called `name`.
     pub fn exit(&mut self, name: &'static str) {
         let names = self.tokenizer.parse_state.extension_names.borrow();
-        let is_named = ext(self.tokenizer)
+        let (is_named, is_content) = ext(self.tokenizer)
             .open
             .last()
-            .map_or(false, |id| names[usize::from(*id)].1 == name);
+            .map_or((false, false), |id| {
+                let (_, known, kind) = &names[usize::from(*id)];
+                (*known == name, matches!(kind, TokenKind::Content(_)))
+            });
         drop(names);
 
-        if !is_named || !at_boundary(self.tokenizer) || self.top_is_empty() {
+        if !is_named || !at_boundary(self.tokenizer) {
             self.broken = true;
             return;
         }
 
-        exit_token(self.tokenizer);
+        if is_chunk_open(self.tokenizer) {
+            exit_chunk(self.tokenizer);
+        }
+
+        if !self.top_is_empty() {
+            if is_content && ext(self.tokenizer).content_blank {
+                self.broken = true;
+            } else {
+                exit_token(self.tokenizer);
+            }
+        } else if is_content {
+            // Empty content is no content.
+            self.tokenizer.events.pop();
+            self.tokenizer.stack.pop();
+            ext_mut(self.tokenizer).open.pop();
+        } else {
+            self.broken = true;
+        }
     }
 
     /// Whether the innermost open token has no bytes yet.
@@ -311,12 +460,12 @@ impl ConstructTokenizer<'_, '_> {
     }
 }
 
-/// Whether the tokenizer is between characters (not in a UTF-8 sequence);
-/// a boundary can be in a tab, between its virtual spaces.
+/// Whether the tokenizer is between characters: not in a UTF-8 sequence, and
+/// not in a tab, unless a line starts there after container prefixes.
 fn at_boundary(tokenizer: &Tokenizer) -> bool {
     let point = &tokenizer.point;
-    point.vs > 0
-        || tokenizer
+    (point.vs == 0 || tokenizer.at_line_start())
+        && tokenizer
             .parse_state
             .bytes
             .get(point.index)
@@ -324,13 +473,18 @@ fn at_boundary(tokenizer: &Tokenizer) -> bool {
 }
 
 /// Number of a token name in this parse, if it fits in an event.
-fn intern(tokenizer: &Tokenizer, construct: u8, name: &'static str) -> Option<u16> {
+fn intern(
+    tokenizer: &Tokenizer,
+    construct: u8,
+    name: &'static str,
+    kind: TokenKind,
+) -> Option<u16> {
     let mut names = tokenizer.parse_state.extension_names.borrow_mut();
     let index = names
         .iter()
-        .position(|known| known.0 == construct && known.1 == name)
+        .position(|known| known.0 == construct && known.1 == name && known.2 == kind)
         .unwrap_or_else(|| {
-            names.push((construct, name));
+            names.push((construct, name, kind));
             names.len() - 1
         });
     u16::try_from(index).ok()
@@ -356,6 +510,61 @@ fn exit_token(tokenizer: &mut Tokenizer) {
         .last_mut()
         .expect("expected event")
         .extension = id;
+}
+
+/// Whether the innermost open token is a content token (or its chunk).
+fn is_content_top(tokenizer: &Tokenizer) -> bool {
+    match tokenizer.stack.last() {
+        Some(Name::Extension) => ext(tokenizer).open.last().map_or(false, |id| {
+            matches!(
+                tokenizer.parse_state.extension_names.borrow()[usize::from(*id)].2,
+                TokenKind::Content(_)
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// Kind of content in the innermost open content token.
+fn content_of_top(tokenizer: &Tokenizer) -> Content {
+    let id = *ext(tokenizer).open.last().expect("expected content token");
+    match &tokenizer.parse_state.extension_names.borrow()[usize::from(id)].2 {
+        TokenKind::Content(content) => content.clone(),
+        _ => unreachable!("expected content token"),
+    }
+}
+
+/// Enter a chunk of content, linked to the previous chunk of the same
+/// content token, across tokens in it.
+fn enter_chunk(tokenizer: &mut Tokenizer, content: Content) {
+    tokenizer.enter_link(
+        Name::ExtensionChunk,
+        Link {
+            previous: None,
+            next: None,
+            content,
+        },
+    );
+    let current = tokenizer.events.len() - 1;
+    if let Some(previous) = ext_mut(tokenizer).last_chunk.replace(current) {
+        link_to(&mut tokenizer.events, previous, current);
+    }
+}
+
+/// Whether a chunk of content is open: its enter is the last event.
+///
+/// Chunks stay off the tokenizer stack, so undoing an attempt, which
+/// truncates events and the stack, also restores an open chunk.
+fn is_chunk_open(tokenizer: &Tokenizer) -> bool {
+    tokenizer.events.last().map_or(false, |event| {
+        event.kind == Kind::Enter && event.name == Name::ExtensionChunk
+    })
+}
+
+/// Exit the open chunk.
+fn exit_chunk(tokenizer: &mut Tokenizer) {
+    tokenizer.stack.push(Name::ExtensionChunk);
+    tokenizer.exit(Name::ExtensionChunk);
 }
 
 /// Construct at `index`.
@@ -430,8 +639,14 @@ pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
     }
 }
 
+/// Whether `event` is of a token of a construct in content, such as a line
+/// prefix.
+pub(crate) fn is_in_content(names: &[TokenName], event: &Event) -> bool {
+    event.name == Name::Extension && names[usize::from(event.extension)].2 == TokenKind::InContent
+}
+
 /// Index of the exit of the event entered at `index`.
-fn balanced_exit(events: &[Event], mut index: usize) -> usize {
+pub(crate) fn balanced_exit(events: &[Event], mut index: usize) -> usize {
     let mut depth = 0;
     loop {
         match events[index].kind {
@@ -445,9 +660,13 @@ fn balanced_exit(events: &[Event], mut index: usize) -> usize {
     }
 }
 
-/// A match of a construct.
+/// A match of a construct, as event indices.
 pub(crate) struct Match<'a> {
     pub tokens: Vec<Token<'a>>,
+    /// Content tokens: token, enter, and exit.
+    pub contents: Vec<(usize, usize, usize)>,
+    /// Events left out of values: content, and container prefixes.
+    pub excluded: Vec<(usize, usize)>,
     /// Index of the last event of the match.
     pub end: usize,
 }
@@ -459,21 +678,35 @@ pub(crate) fn collect_tokens<'a>(
     names: &[TokenName],
     start: usize,
 ) -> Match<'a> {
-    // Name, enter, and exit.
-    let mut spans: Vec<(&'static str, usize, usize)> = vec![];
+    // Name, enter, exit, and whether content.
+    let mut spans: Vec<(&'static str, usize, usize, bool)> = vec![];
     let mut open = vec![];
-    // Events left out of values: container prefixes.
+    let mut contents = vec![];
     let mut excluded = vec![];
     let mut index = start;
+    // The match’s own tokens in content are inside its content tokens, which
+    // are skipped, so tokens in content here are another match’s.
+    let is_own = |event: &Event| names[usize::from(event.extension)].2 != TokenKind::InContent;
 
     loop {
         let event = &events[index];
         match (&event.kind, &event.name) {
-            (Kind::Enter, Name::Extension) => {
-                spans.push((names[usize::from(event.extension)].1, index, index));
+            (Kind::Enter, Name::Extension) if is_own(event) => {
+                let (_, name, kind) = &names[usize::from(event.extension)];
+                let is_content = matches!(kind, TokenKind::Content(_));
+                spans.push((name, index, index, is_content));
                 open.push(spans.len() - 1);
+
+                if is_content {
+                    let enter = index;
+                    index = balanced_exit(events, index);
+                    contents.push((spans.len() - 1, enter, index));
+                    excluded.push((enter, index));
+                    // Handle the exit.
+                    continue;
+                }
             }
-            (Kind::Exit, Name::Extension) => {
+            (Kind::Exit, Name::Extension) if is_own(event) => {
                 let span = open.pop().expect("expected an open token");
                 spans[span].2 = index;
                 if open.is_empty() {
@@ -493,9 +726,14 @@ pub(crate) fn collect_tokens<'a>(
 
     let tokens = spans
         .into_iter()
-        .map(|(name, enter, exit)| Token {
+        .map(|(name, enter, exit, is_content)| Token {
             name,
-            value: own_text(events, bytes, enter, exit, &excluded),
+            value: if is_content {
+                Cow::Borrowed("")
+            } else {
+                own_text(events, bytes, enter, exit, &excluded)
+            },
+            children: vec![],
             position: Position {
                 start: events[enter].point.to_unist(),
                 end: events[exit].point.to_unist(),
@@ -503,12 +741,17 @@ pub(crate) fn collect_tokens<'a>(
         })
         .collect();
 
-    Match { tokens, end: index }
+    Match {
+        tokens,
+        contents,
+        excluded,
+        end: index,
+    }
 }
 
 /// Source text from event `enter` to event `exit`, without the excluded
 /// events inside.
-fn own_text<'a>(
+pub(crate) fn own_text<'a>(
     events: &[Event],
     bytes: &'a [u8],
     enter: usize,

@@ -1,5 +1,5 @@
 use markdown::{
-    extension::{Construct, ConstructTokenizer, Step, Token},
+    extension::{Construct, ConstructTokenizer, ContentType, Step, Token},
     mdast::{Custom, Node, Paragraph, Root, Text},
     to_html_with_options, to_mdast,
     unist::Position,
@@ -228,6 +228,10 @@ impl Construct for Scripted {
                 .iter()
                 .map(|token| (token.name.into(), token.value.clone().into_owned()))
                 .collect(),
+            children: tokens
+                .into_iter()
+                .flat_map(|token| token.children)
+                .collect(),
             ..Custom::default()
         })
     }
@@ -393,10 +397,79 @@ fn broken_constructs_leave_text() {
             tokenizer.exit("b");
             Step::Ok
         }),
+        (
+            "a token in text content after content on its line",
+            |state, tokenizer| match state {
+                0 => {
+                    tokenizer.enter("a");
+                    tokenizer.consume();
+                    tokenizer.enter_content("b", ContentType::Text);
+                    Step::Next(1)
+                }
+                1 => {
+                    tokenizer.consume();
+                    Step::Next(2)
+                }
+                _ => {
+                    tokenizer.enter("mid");
+                    tokenizer.consume();
+                    tokenizer.exit("mid");
+                    tokenizer.exit("b");
+                    tokenizer.exit("a");
+                    Step::Ok
+                }
+            },
+        ),
+        (
+            "a content token in content",
+            |state, tokenizer| match state {
+                0 => {
+                    tokenizer.enter("a");
+                    tokenizer.consume();
+                    tokenizer.enter_content("b", ContentType::Text);
+                    Step::Next(1)
+                }
+                1 => {
+                    tokenizer.consume();
+                    Step::Next(2)
+                }
+                _ => {
+                    tokenizer.enter_content("c", ContentType::Text);
+                    tokenizer.consume();
+                    tokenizer.exit("c");
+                    tokenizer.exit("b");
+                    tokenizer.exit("a");
+                    Step::Ok
+                }
+            },
+        ),
+        // Its content, `{y`, does not match again: without the rule, the
+        // construct matches.
+        ("content at the first byte", |state, tokenizer| {
+            match (state, tokenizer.current()) {
+                (0, _) => {
+                    tokenizer.enter("a");
+                    tokenizer.enter_content("b", ContentType::Text);
+                    tokenizer.consume();
+                    Step::Next(1)
+                }
+                (1, _) => {
+                    tokenizer.consume();
+                    Step::Next(2)
+                }
+                (_, Some(b'z')) => {
+                    tokenizer.exit("b");
+                    tokenizer.consume();
+                    tokenizer.exit("a");
+                    Step::Ok
+                }
+                _ => Step::Nok,
+            }
+        }),
     ];
 
     for (label, step) in cases {
-        let tree = to_mdast("x {y", &scripted(step)).unwrap();
+        let tree = to_mdast("x {yz", &scripted(step)).unwrap();
         assert!(
             find_scripted(&tree).is_none(),
             "should not match a construct that breaks a rule: {}",
@@ -404,7 +477,7 @@ fn broken_constructs_leave_text() {
         );
         assert_eq!(
             tree.to_string(),
-            "x {y",
+            "x {yz",
             "should keep text for a construct that breaks a rule: {}",
             label
         );
@@ -954,5 +1027,615 @@ fn errors_with_more_than_255_constructs() {
     assert!(
         to_mdast("@a", &options((0..255).map(|_| mention()).collect())).is_ok(),
         "should work with 255 constructs"
+    );
+}
+
+/// `{{`, content parsed as text, `}}`.
+fn braces_content(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+    match (state, tokenizer.current()) {
+        (0, Some(b'{')) => {
+            tokenizer.enter("braces");
+            tokenizer.consume();
+            Step::Next(1)
+        }
+        (1, Some(b'{')) => {
+            tokenizer.consume();
+            tokenizer.enter_content("bracesContent", ContentType::Text);
+            Step::Next(2)
+        }
+        (2, Some(b'}')) => {
+            tokenizer.exit("bracesContent");
+            tokenizer.consume();
+            Step::Next(3)
+        }
+        (2, Some(_)) => {
+            tokenizer.consume();
+            Step::Next(2)
+        }
+        (3, Some(b'}')) => {
+            tokenizer.consume();
+            tokenizer.exit("braces");
+            Step::Ok
+        }
+        _ => Step::Nok,
+    }
+}
+
+fn html(input: &str, parse: ParseOptions) -> String {
+    to_html_with_options(
+        input,
+        &Options {
+            parse,
+            ..Options::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn parses_content_as_markdown() {
+    let children = phrasing(to_mdast("a {{*b*}} c", &scripted(braces_content)).unwrap());
+    let node = custom(&children[1]);
+
+    assert!(
+        matches!(node.children[..], [Node::Emphasis(_)]),
+        "should give the content as children, got {:?}",
+        node.children
+    );
+    assert_eq!(
+        node.value.as_deref(),
+        Some("{{}}"),
+        "should leave content out of the values of other tokens"
+    );
+    assert_eq!(
+        node.attributes.get("bracesContent").map(String::as_str),
+        Some(""),
+        "should give content tokens an empty value"
+    );
+}
+
+#[test]
+fn parses_content_across_lines_without_prefixes() {
+    let tree = to_mdast("> a {{*b\n> c*}} d", &scripted(braces_content)).unwrap();
+    let node = find_scripted(&tree).expect("expected a match");
+
+    assert_eq!(
+        node.children[0].to_string(),
+        "b\nc",
+        "should parse content across lines, without the `> ` prefix"
+    );
+    assert_eq!(
+        node.children[0].position(),
+        Some(&Position::new(1, 7, 6, 2, 5, 13)),
+        "should give nested nodes positions in the source"
+    );
+}
+
+#[test]
+fn keeps_whitespace_around_content() {
+    let tree = to_mdast("{{ *a* }}", &scripted(braces_content)).unwrap();
+
+    assert_eq!(
+        find_scripted(&tree).unwrap().children.len(),
+        3,
+        "should keep initial and final whitespace, like micromark labels"
+    );
+}
+
+#[test]
+fn parses_constructs_in_content() {
+    let parse = ParseOptions {
+        text_constructs: vec![
+            Box::new(Scripted {
+                marker: b'{',
+                step: braces_content,
+            }),
+            Box::new(mention()),
+        ],
+        ..ParseOptions::default()
+    };
+    let tree = to_mdast("{{x @a y}}", &parse).unwrap();
+    let node = find_scripted(&tree).expect("expected a match");
+
+    assert!(
+        matches!(&node.children[1], Node::Custom(Custom { name, .. }) if name == "mention"),
+        "should parse other constructs in content, got {:?}",
+        node.children
+    );
+}
+
+#[test]
+fn drops_empty_content() {
+    let empty: StepFn = |state, tokenizer| match state {
+        0 => {
+            tokenizer.enter("a");
+            tokenizer.consume();
+            tokenizer.enter_content("b", ContentType::Text);
+            Step::Next(1)
+        }
+        _ => {
+            tokenizer.exit("b");
+            tokenizer.exit("a");
+            Step::Ok
+        }
+    };
+    let tree = to_mdast("{", &scripted(empty)).unwrap();
+
+    assert_eq!(
+        find_scripted(&tree).and_then(|node| node.fields.get("tokens").cloned()),
+        Some("a".into()),
+        "should drop a content token without content"
+    );
+}
+
+#[test]
+fn to_html_renders_content_and_writes_own_text() {
+    assert_eq!(
+        html("a {{*b*}} c", scripted(braces_content)),
+        "<p>a {{<em>b</em>}} c</p>",
+        "should render content once, with the construct text around it"
+    );
+    assert_eq!(
+        html("> a {{*b\n> c*}} d", scripted(braces_content)),
+        "<blockquote>\n<p>a {{<em>b\nc</em>}} d</p>\n</blockquote>",
+        "should write construct text without prefixes"
+    );
+}
+
+/// `braces_content`, with a `|` token at the start of later lines.
+fn braces_prefixed(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+    match (state, tokenizer.current()) {
+        (2, Some(b'\n')) => {
+            tokenizer.consume();
+            Step::Next(4)
+        }
+        (4, Some(b'|')) => {
+            tokenizer.enter("bracesPrefix");
+            tokenizer.consume();
+            tokenizer.exit("bracesPrefix");
+            Step::Next(2)
+        }
+        (4, _) => Step::Retry(2),
+        _ => braces_content(state, tokenizer),
+    }
+}
+
+#[test]
+fn keeps_tokens_at_line_starts_out_of_content() {
+    let tree = to_mdast("{{*a\n|b*}}", &scripted(braces_prefixed)).unwrap();
+    let node = find_scripted(&tree).expect("expected a match");
+
+    assert_eq!(
+        node.children[0].to_string(),
+        "a\nb",
+        "should parse content across the token, without it"
+    );
+    assert_eq!(
+        node.fields.get("tokens").map(String::as_str),
+        Some("braces,bracesContent"),
+        "should not give tokens in content to `to_mdast`"
+    );
+    assert_eq!(
+        html("{{*a\n|b*}}", scripted(braces_prefixed)),
+        "<p>{{<em>a\nb</em>}}</p>",
+        "should leave tokens in content out of HTML"
+    );
+}
+
+#[test]
+fn content_has_no_blank_lines() {
+    // Built-in constructs in text expect no blank lines, as in a paragraph.
+    for input in [
+        "{{[x](\n}}",
+        "{{\na}}",
+        "{{ }}",
+        "{{a\n|\n|b}}",
+        "{{a\n| \n|b}}",
+        "{{[a](b\n|\n|c)}}",
+        "{{<a\n|\n|b>}}",
+    ] {
+        let tree = to_mdast(input, &scripted(braces_prefixed)).unwrap();
+
+        assert!(
+            find_scripted(&tree).is_none(),
+            "should not match content with a blank line in {:?}",
+            input
+        );
+        assert_eq!(
+            html(input, scripted(braces_prefixed)),
+            to_html_with_options(input, &Options::default()).unwrap(),
+            "should keep text for content with a blank line in {:?}",
+            input
+        );
+    }
+}
+
+#[test]
+fn tokens_do_not_end_inside_a_tab() {
+    /// `>` and the next three bytes, which can end inside a tab.
+    fn four_bytes(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+        match state {
+            0 => {
+                tokenizer.enter("a");
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            1..=3 => {
+                tokenizer.consume();
+                Step::Next(state + 1)
+            }
+            _ => {
+                tokenizer.exit("a");
+                Step::Ok
+            }
+        }
+    }
+
+    /// `>` and the whitespace after it, character by character.
+    fn whitespace(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+        match (state, tokenizer.current_char()) {
+            (0, _) => {
+                tokenizer.enter("a");
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            // Columns of a tab after its first.
+            (1, None) if tokenizer.current().is_some() => {
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            (1, Some(' ' | '\t')) => {
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            _ => {
+                tokenizer.exit("a");
+                Step::Ok
+            }
+        }
+    }
+
+    /// `>` and one tab, read as a character.
+    fn tab(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+        match (state, tokenizer.current_char()) {
+            (0, _) => {
+                tokenizer.enter("a");
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            (1, Some('\t')) => {
+                tokenizer.consume();
+                Step::Next(2)
+            }
+            (2, None) if tokenizer.current().is_some() => {
+                tokenizer.consume();
+                Step::Next(2)
+            }
+            (2, _) => {
+                tokenizer.exit("a");
+                Step::Ok
+            }
+            _ => Step::Nok,
+        }
+    }
+
+    let gfm = |step| ParseOptions {
+        text_constructs: vec![Box::new(Scripted { marker: b'>', step })],
+        ..ParseOptions::gfm()
+    };
+
+    let tree = to_mdast("#>\t z", &gfm(tab)).unwrap();
+    assert_eq!(
+        custom(&tree.children().unwrap()[0].children().unwrap()[1])
+            .value
+            .as_deref(),
+        Some(">\t"),
+        "should give `None` as the character inside a tab"
+    );
+
+    /// The rest of a tab that a line starts inside of.
+    fn rest_of_tab(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+        match (state, tokenizer.current_char()) {
+            (0, Some(' ')) => {
+                tokenizer.enter("a");
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            (1, None) if tokenizer.current().is_some() => {
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            (1, _) => {
+                tokenizer.exit("a");
+                Step::Ok
+            }
+            _ => Step::Nok,
+        }
+    }
+
+    let parse = ParseOptions {
+        text_constructs: vec![Box::new(Scripted {
+            marker: b' ',
+            step: rest_of_tab,
+        })],
+        ..ParseOptions::default()
+    };
+    assert!(
+        find_scripted(&to_mdast("- a\n\t@b", &parse).unwrap()).is_some(),
+        "should start a token where a line starts inside a tab"
+    );
+
+    let input = "#>  \tza@b.c";
+
+    assert_eq!(
+        to_mdast(input, &gfm(four_bytes)).unwrap(),
+        to_mdast(input, &ParseOptions::gfm()).unwrap(),
+        "should not match a construct that ends inside a tab"
+    );
+
+    let tree = to_mdast(input, &gfm(whitespace)).unwrap();
+    let paragraph = tree.children().unwrap()[0].children().unwrap();
+
+    assert_eq!(
+        custom(&paragraph[1]).value.as_deref(),
+        Some(">  \t"),
+        "should match a construct that takes the whole tab"
+    );
+    assert_eq!(
+        paragraph[2].position(),
+        Some(&Position::new(1, 9, 5, 1, 15, 11)),
+        "should keep positions after the tab"
+    );
+}
+
+#[test]
+fn ends_gfm_autolink_literals_at_the_end_of_content() {
+    /// `{`, content up to `X`, `X`, `}`.
+    fn up_to_x(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+        match (state, tokenizer.current()) {
+            (0, Some(b'{')) => {
+                tokenizer.enter("a");
+                tokenizer.consume();
+                tokenizer.enter_content("b", ContentType::Text);
+                Step::Next(1)
+            }
+            (1, Some(b'X')) => {
+                tokenizer.exit("b");
+                tokenizer.consume();
+                Step::Next(2)
+            }
+            (1, Some(_)) => {
+                tokenizer.consume();
+                Step::Next(1)
+            }
+            (2, Some(b'}')) => {
+                tokenizer.consume();
+                tokenizer.exit("a");
+                Step::Ok
+            }
+            _ => Step::Nok,
+        }
+    }
+
+    let parse = ParseOptions {
+        text_constructs: vec![Box::new(Scripted {
+            marker: b'{',
+            step: up_to_x,
+        })],
+        ..ParseOptions::gfm()
+    };
+    let tree = to_mdast("{www.aX}", &parse).unwrap();
+    let node = find_scripted(&tree).expect("expected a match");
+
+    assert!(
+        matches!(&node.children[..], [Node::Link(link)] if link.children[0].to_string() == "www.a"),
+        "should end a literal where the content ends, got {:?}",
+        node.children
+    );
+}
+
+#[test]
+fn errors_for_mdx_jsx_left_open_in_content() {
+    let parse = ParseOptions {
+        constructs: markdown::Constructs::mdx(),
+        ..scripted(braces_content)
+    };
+
+    assert_eq!(
+        to_mdast("a {{<b>}} c", &parse)
+            .unwrap_err()
+            .rule_id
+            .as_str(),
+        "end-tag-mismatch",
+        "should error like a paragraph does"
+    );
+}
+
+#[test]
+fn errors_for_mdx_jsx_closed_in_other_content() {
+    let parse = ParseOptions {
+        constructs: markdown::Constructs::mdx(),
+        ..scripted(braces_content)
+    };
+
+    assert_eq!(
+        to_mdast("x <a> {{b</a>}} c", &parse)
+            .unwrap_err()
+            .rule_id
+            .as_str(),
+        "end-tag-mismatch",
+        "should error for a closing tag whose opening tag is outside the content"
+    );
+}
+
+/// Levels of matches of `scripted` in `node`.
+fn depth(node: &Node) -> usize {
+    let own = usize::from(matches!(node, Node::Custom(custom) if custom.name == "scripted"));
+    own + node
+        .children()
+        .map_or(0, |children| children.iter().map(depth).max().unwrap_or(0))
+}
+
+/// `(`, content with balanced parentheses, `)`.
+fn parens(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+    match (state, tokenizer.current()) {
+        (0, Some(b'(')) => {
+            tokenizer.enter("a");
+            tokenizer.consume();
+            tokenizer.enter_content("b", ContentType::Text);
+            tokenizer.memory()[0] = 1;
+            Step::Next(1)
+        }
+        (1, Some(b')')) if tokenizer.memory()[0] == 1 => {
+            tokenizer.exit("b");
+            tokenizer.consume();
+            tokenizer.exit("a");
+            Step::Ok
+        }
+        (1, Some(byte)) => {
+            match byte {
+                b'(' => tokenizer.memory()[0] += 1,
+                b')' => tokenizer.memory()[0] -= 1,
+                _ => {}
+            }
+            tokenizer.consume();
+            Step::Next(1)
+        }
+        _ => Step::Nok,
+    }
+}
+
+#[test]
+fn limits_the_depth_of_content() {
+    let parse = ParseOptions {
+        text_constructs: vec![Box::new(Scripted {
+            marker: b'(',
+            step: parens,
+        })],
+        ..ParseOptions::default()
+    };
+    let depth_of = |levels: usize| {
+        let input = format!("{}a{}", "(".repeat(levels), ")".repeat(levels));
+        depth(&to_mdast(&input, &parse).unwrap())
+    };
+    // With the text of the paragraph, 31 levels are 32 levels of content.
+    assert_eq!(depth_of(31), 31, "should nest content 32 deep");
+    assert_eq!(
+        depth_of(40),
+        31,
+        "should not match content deeper than that"
+    );
+}
+
+/// `{`, content, `,`, content, `}`, with a `|` token allowed at the start of
+/// the second content.
+fn pair(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+    match (state, tokenizer.current()) {
+        (0, Some(b'{')) => {
+            tokenizer.enter("pair");
+            tokenizer.consume();
+            tokenizer.enter_content("left", ContentType::Text);
+            Step::Next(1)
+        }
+        (1, Some(b',')) => {
+            tokenizer.exit("left");
+            tokenizer.consume();
+            tokenizer.enter_content("right", ContentType::Text);
+            tokenizer.memory()[0] = 1;
+            Step::Next(2)
+        }
+        (2, Some(b'|')) if tokenizer.memory()[0] == 1 => {
+            tokenizer.enter("pairPrefix");
+            tokenizer.consume();
+            tokenizer.exit("pairPrefix");
+            tokenizer.memory()[0] = 0;
+            Step::Next(2)
+        }
+        (2, Some(b'}')) => {
+            tokenizer.exit("right");
+            tokenizer.consume();
+            tokenizer.exit("pair");
+            Step::Ok
+        }
+        (1 | 2, Some(_)) => {
+            tokenizer.consume();
+            tokenizer.memory()[0] = 0;
+            Step::Next(state)
+        }
+        _ => Step::Nok,
+    }
+}
+
+#[test]
+fn parses_each_content_token_alone() {
+    let tree = to_mdast("{*a*,*b*}", &scripted(pair)).unwrap();
+    let node = find_scripted(&tree).expect("expected a match");
+
+    assert!(
+        matches!(node.children[..], [Node::Emphasis(_), Node::Emphasis(_)]),
+        "should parse each content token on its own, got {:?}",
+        node.children
+    );
+    assert_eq!(
+        html("{*a*,*b*}", scripted(pair)),
+        "<p>{<em>a</em>,<em>b</em>}</p>",
+        "should render each content token"
+    );
+
+    let tree = to_mdast("{a,|b}", &scripted(pair)).unwrap();
+    let node = find_scripted(&tree).expect("expected a match");
+
+    assert_eq!(
+        node.fields.get("tokens").map(String::as_str),
+        Some("pair,left,right"),
+        "should allow a token before the content of a later content token"
+    );
+}
+
+#[test]
+fn skips_prefix_tokens_of_an_outer_match() {
+    /// `braces_prefixed`, or `{[`, raw text as a token, `]]`.
+    fn outer_or_raw(state: u16, tokenizer: &mut ConstructTokenizer) -> Step {
+        match (state, tokenizer.current()) {
+            (1, Some(b'[')) => {
+                tokenizer.consume();
+                tokenizer.enter("raw");
+                Step::Next(20)
+            }
+            (20, Some(b']')) => {
+                tokenizer.exit("raw");
+                tokenizer.consume();
+                Step::Next(21)
+            }
+            (20, Some(_)) => {
+                tokenizer.consume();
+                Step::Next(20)
+            }
+            (21, Some(b']')) => {
+                tokenizer.consume();
+                tokenizer.exit("braces");
+                Step::Ok
+            }
+            _ => braces_prefixed(state, tokenizer),
+        }
+    }
+
+    let tree = to_mdast("{{a {[b\n|c]] d}}", &scripted(outer_or_raw)).unwrap();
+    let outer = find_scripted(&tree).expect("expected a match");
+    let inner = outer
+        .children
+        .iter()
+        .find_map(find_scripted)
+        .expect("expected an inner match");
+
+    assert_eq!(
+        inner.attributes.get("raw").map(String::as_str),
+        Some("b\nc"),
+        "should leave the prefix of the outer match out of the inner one"
+    );
+    assert_eq!(
+        inner.fields.get("tokens").map(String::as_str),
+        Some("braces,raw"),
+        "should not give the prefix of the outer match to the inner one"
     );
 }
