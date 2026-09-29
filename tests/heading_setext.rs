@@ -256,6 +256,44 @@ fn heading_setext() -> Result<(), message::Message> {
     );
 
     assert_eq!(
+        to_html("[a]: b\n---"),
+        "<hr />",
+        "should support a thematic break after a definition"
+    );
+
+    assert_eq!(
+        to_html("a\n=\n---"),
+        "<h1>a</h1>\n<hr />",
+        "should support a thematic break after a setext heading"
+    );
+
+    assert_eq!(
+        to_mdast("=\n=\n=\na\n=", &Default::default())?,
+        Node::Root(Root {
+            children: vec![
+                Node::Heading(Heading {
+                    depth: 1,
+                    children: vec![Node::Text(Text {
+                        value: "=".into(),
+                        position: Some(Position::new(1, 1, 0, 1, 2, 1))
+                    })],
+                    position: Some(Position::new(1, 1, 0, 2, 2, 3))
+                }),
+                Node::Heading(Heading {
+                    depth: 1,
+                    children: vec![Node::Text(Text {
+                        value: "=\na".into(),
+                        position: Some(Position::new(3, 1, 4, 4, 2, 7))
+                    })],
+                    position: Some(Position::new(3, 1, 4, 5, 2, 9))
+                })
+            ],
+            position: Some(Position::new(1, 1, 0, 5, 2, 9))
+        }),
+        "should support a setext heading after a heading and a demoted underline in mdast (GH-31)"
+    );
+
+    assert_eq!(
         to_html("> ===\na"),
         "<blockquote>\n<p>===\na</p>\n</blockquote>",
         "should not support lazyness (1)"

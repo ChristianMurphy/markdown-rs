@@ -132,42 +132,31 @@ fn fuzz() -> Result<(), message::Message> {
     assert_eq!(
         to_html("[:]:a\n-\na\n-"),
         "<h2>-\na</h2>",
-        "xx: handle link in heading (GH-22)"
+        "13-a: handle link in heading (GH-22)"
     );
 
     assert_eq!(
         to_html("a\n-\n--\na\n-"),
         "<h2>a</h2>\n<h2>--\na</h2>",
-        "xx: two setext headings next to each other (GH-22)"
+        "13-b: two setext headings next to each other (GH-22)"
     );
 
-    // Additional shape variants of the same `to_html.rs:197` panic, found via
-    // fuzzing. All hit `expect("at least one buffer should exist")` in
-    // `CompileContext::line_ending_if_needed` reached from
-    // `on_exit_heading_setext_underline_sequence`.
-
-    assert!(
-        matches!(
-            to_html_with_options("x\n=\n=\nx\n=\n", &Options::default()),
-            Ok(_)
-        ),
-        "xx: setext underlines alternating with paragraphs (GH-22 variant)"
+    assert_eq!(
+        to_html("=\n=\n=\na\n="),
+        "<h1>=</h1>\n<h1>=\na</h1>",
+        "13-c: two setext headings next to each other, with equals signs (GH-31, GH-208)"
     );
 
-    assert!(
-        matches!(
-            to_html_with_options("Foo *bar*\n=========\n---------\nr*\n=========\n--------", &Options::default()),
-            Ok(_)
-        ),
-        "xx: setext underlines mixed with attention runs (GH-22 variant)"
+    assert_eq!(
+        to_html("x\n=\n=\nx\n=\n"),
+        "<h1>x</h1>\n<h1>=\nx</h1>\n",
+        "13-d: two setext headings next to each other, with a trailing eol (GH-210)"
     );
 
-    assert!(
-        matches!(
-            to_html_with_options("a\n-\n--\na\n-", &Options::gfm()),
-            Ok(_)
-        ),
-        "xx: same shape as GH-22 case 2 also panics with gfm options (GH-22 variant)"
+    assert_eq!(
+        to_html("Foo *bar*\n=========\n---------\nr*\n=========\n--------"),
+        "<h1>Foo <em>bar</em></h1>\n<hr />\n<h1>r*</h1>\n<hr />",
+        "13-e: thematic breaks after setext headings (GH-210)"
     );
 
     Ok(())
