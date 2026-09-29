@@ -428,6 +428,14 @@ impl<'a> Tokenizer<'a> {
         self.account_for_potential_skip();
     }
 
+    /// Define a jump for the line of `point`, unless one is defined: for a
+    /// chunk that continues the line of the chunk before it.
+    pub fn define_skip_if_missing(&mut self, point: Point) {
+        if point.line - self.first_line >= self.column_start.len() {
+            self.define_skip(point);
+        }
+    }
+
     /// Whether the current point is where a line after the first starts,
     /// after its skip, if any.
     pub fn at_line_start(&self) -> bool {
