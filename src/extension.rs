@@ -3,7 +3,8 @@
 //! A construct is a state machine driven by the built-in tokenizer, like a
 //! micromark construct, so it sees text without container prefixes such as
 //! `> `, across lines.
-//! Pass constructs in [`ParseOptions::text_constructs`][crate::ParseOptions].
+//! Pass constructs in `text_constructs` and `flow_constructs` of
+//! [`ParseOptions`].
 //!
 //! [`to_mdast()`][crate::to_mdast()] turns each match into a node with
 //! [`Construct::to_mdast`].
@@ -64,12 +65,15 @@
 //! # Ok::<(), markdown::message::Message>(())
 //! ```
 
+use crate::construct::partial_space_or_tab::space_or_tab_min_max;
 use crate::event::{Content, Event, Kind, Link, Name, Point};
 use crate::mdast;
+use crate::message;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::link_to;
 use crate::tokenizer::{move_point_back, Tokenizer};
 use crate::unist::Position;
+use crate::util::constant::TAB_SIZE;
 use crate::util::slice::{Position as SlicePosition, Slice};
 use crate::ParseOptions;
 use alloc::{borrow::Cow, boxed::Box, string::String, vec, vec::Vec};
@@ -89,9 +93,11 @@ const CONTENT_MAX: usize = 32;
 /// A construct, such as a mention.
 ///
 /// Constructs in [`ParseOptions::text_constructs`][crate::ParseOptions] run
-/// in text.
-/// They are tried in order, before built-ins, at their markers (never line
-/// endings).
+/// in text, and those in `flow_constructs` at the start of a line in flow,
+/// after up to 3 columns of indentation.
+/// They are tried in order, before built-ins, at their markers, which are
+/// never line endings, and in flow never spaces or tabs, which are
+/// indentation.
 ///
 /// A construct that breaks one of these rules does not match, so its bytes
 /// stay what they would otherwise be (in an attempt, the attempt fails):
@@ -101,14 +107,16 @@ const CONTENT_MAX: usize = 32;
 /// * `exit` closes the innermost open token; an attempt closes only tokens
 ///   it opened
 /// * `Next` comes after a `consume`, `Retry` and `Attempt` do not
-/// * after consuming a line ending, a step returns `Next`, and can first
-///   `exit` tokens that end there
+/// * after consuming a line ending, a step returns `Next`; in text, it can
+///   first `exit` tokens that end there
+/// * in flow, an attempt does not consume a line ending
 /// * the first byte of a match is not content
 /// * every line of content has a byte other than a space or tab, like a
 ///   paragraph
 /// * inside content, a token holds no content, and starts before the
 ///   content of its line, like a line prefix
-/// * `Ok` comes after at least one byte, with every token closed; in an
+/// * `Ok` comes after at least one byte, with every token closed; in flow,
+///   at a line ending or the end, in a step that did not consume; in an
 ///   attempt, with the tokens it opened closed
 /// * tokens start and end between characters, not inside one; a tab is one
 ///   character, but a line can start inside it, after container prefixes
@@ -123,13 +131,16 @@ const CONTENT_MAX: usize = 32;
 /// match.
 /// A failed construct is tried again at its next marker, so keep lookahead
 /// bounded, or parsing becomes quadratic.
+/// A flow construct decides on its first line: after it consumed a line
+/// ending, `Nok` is a parse error.
 pub trait Construct {
     /// Bytes this construct can start at.
     fn markers(&self) -> &[u8];
 
     /// Whether the construct can start after `previous`, the byte before it:
-    /// `b'\n'` at the start of a line, after container prefixes, and `None`
-    /// at the start or after a character escape.
+    /// `b'\n'` at the start of a line, after container prefixes and before
+    /// the indentation of a flow construct, and `None` at the start or after
+    /// a character escape.
     fn previous(&self, previous: Option<u8>) -> bool {
         let _ = previous;
         true
@@ -246,6 +257,22 @@ pub(crate) struct ExtensionState {
     content_blank: bool,
     /// Enter of the last chunk of the current content token.
     last_chunk: Option<usize>,
+    /// Where the current flow construct is in its lines.
+    line: FlowLine,
+    /// Columns of indentation before the current flow construct.
+    indent: usize,
+}
+
+/// Where a flow construct is in its lines.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FlowLine {
+    /// On its first line, where it can fail without an error.
+    #[default]
+    First,
+    /// Past a line ending, so it matches or errors.
+    Committed,
+    /// At a line ending before a lazy line or the end, where it ends.
+    Lazy,
 }
 
 /// An attempt a construct is in, and what undoing it restores.
@@ -285,10 +312,18 @@ pub(crate) fn ext_mut<'t>(tokenizer: &'t mut Tokenizer) -> &'t mut ExtensionStat
         .get_or_insert_with(Box::default)
 }
 
+/// Where a construct runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Place {
+    Text,
+    Flow,
+}
+
 /// The tokenizer, as a construct sees it.
 pub struct ConstructTokenizer<'t, 'a> {
     tokenizer: &'t mut Tokenizer<'a>,
     index: u8,
+    place: Place,
     consumed: bool,
     /// Whether a line ending was consumed in this step.
     line_ending: bool,
@@ -301,8 +336,17 @@ impl ConstructTokenizer<'_, '_> {
     /// Line endings (CR, LF, CR+LF) are all `b'\n'`.
     /// After `consume`, this is `None` until the next step brings the next
     /// byte.
+    /// In flow, a line ending before a lazy line or the end is `None`: the
+    /// construct ends there.
     pub fn current(&self) -> Option<u8> {
-        self.tokenizer.current
+        if self.place == Place::Flow
+            && self.tokenizer.current == Some(b'\n')
+            && ext(self.tokenizer).line == FlowLine::Lazy
+        {
+            None
+        } else {
+            self.tokenizer.current
+        }
     }
 
     /// Current character, or `None` at the end or inside a character.
@@ -329,6 +373,12 @@ impl ConstructTokenizer<'_, '_> {
         self.tokenizer.parse_state.options
     }
 
+    /// Columns of indentation (0 to 3) before a flow construct, which it
+    /// starts after, like micromark’s `linePrefix`; `0` in text.
+    pub fn indent(&self) -> usize {
+        ext(self.tokenizer).indent
+    }
+
     /// Memory of the current match, all zero at its start, such as the size
     /// of an opening fence: micromark keeps these in closures.
     ///
@@ -351,17 +401,25 @@ impl ConstructTokenizer<'_, '_> {
         }
 
         let is_eol = self.tokenizer.current == Some(b'\n');
+        let in_content = is_content_top(self.tokenizer);
 
-        if is_content_top(self.tokenizer) {
-            if is_eol && ext(self.tokenizer).content_blank {
+        if in_content && is_eol && ext(self.tokenizer).content_blank {
+            self.broken = true;
+            return;
+        }
+
+        // In flow, the line ending is consumed after the step, once the next
+        // line is known to continue the construct.
+        if self.place == Place::Flow && is_eol {
+            if !ext(self.tokenizer).attempts.is_empty() {
                 self.broken = true;
                 return;
             }
-
+        } else if in_content {
             // Content goes into linked chunks, one per line, parsed later.
             if !is_chunk_open(self.tokenizer) {
                 let content = content_of_top(self.tokenizer);
-                enter_chunk(self.tokenizer, content);
+                enter_chunk(self.tokenizer, Name::ExtensionChunk, content);
                 self.tokenizer.stack.pop();
             }
             let (line, is_blank) = (
@@ -476,7 +534,12 @@ impl ConstructTokenizer<'_, '_> {
             .last()
             .map_or(false, |frame| state.open.len() <= frame.open_len);
 
-        if !is_named || is_before_attempt || !at_boundary(self.tokenizer) {
+        // In flow, the line ending is consumed after the step.
+        if (self.line_ending && self.place == Place::Flow)
+            || !is_named
+            || is_before_attempt
+            || !at_boundary(self.tokenizer)
+        {
             self.broken = true;
             return;
         }
@@ -590,9 +653,9 @@ fn content_of_top(tokenizer: &Tokenizer) -> Content {
 
 /// Enter a chunk of content, linked to the previous chunk of the same
 /// content token, across tokens in it.
-fn enter_chunk(tokenizer: &mut Tokenizer, content: Content) {
+fn enter_chunk(tokenizer: &mut Tokenizer, name: Name, content: Content) {
     tokenizer.enter_link(
-        Name::ExtensionChunk,
+        name,
         Link {
             previous: None,
             next: None,
@@ -621,25 +684,96 @@ fn exit_chunk(tokenizer: &mut Tokenizer) {
     tokenizer.exit(Name::ExtensionChunk);
 }
 
-/// Construct at `index`.
-pub(crate) fn construct(options: &ParseOptions, index: u8) -> &dyn Construct {
-    &*options.text_constructs[usize::from(index)]
+/// Construct at `index`: text constructs, then flow.
+pub(crate) fn construct(options: &ParseOptions, index: u8) -> (&dyn Construct, Place) {
+    let index = usize::from(index);
+    match options.text_constructs.get(index) {
+        Some(construct) => (&**construct, Place::Text),
+        None => (
+            &*options.flow_constructs[index - options.text_constructs.len()],
+            Place::Flow,
+        ),
+    }
 }
 
 /// Start trying construct `index`.
 pub(crate) fn start(tokenizer: &mut Tokenizer, index: u8) -> State {
-    let (start, events) = (tokenizer.point.index, tokenizer.events.len());
+    let column = tokenizer.point.column;
     let state = ext_mut(tokenizer);
-    state.start = start;
-    state.events = events;
-    state.steps = 0;
-    state.at = start;
-    state.furthest = start;
     state.index = index;
     state.state = 0;
     state.memory = [0; 4];
     state.open.clear();
     state.last_chunk = None;
+    state.line = FlowLine::First;
+    state.indent = column;
+
+    if construct(tokenizer.parse_state.options, index).1 == Place::Flow
+        && matches!(tokenizer.current, Some(b'\t' | b' '))
+    {
+        tokenizer.attempt(State::Next(StateName::ExtensionIndentAfter), State::Nok);
+        return State::Retry(space_or_tab_min_max(tokenizer, 0, TAB_SIZE - 1));
+    }
+
+    indent_after(tokenizer)
+}
+
+/// After the indentation of a flow construct, at its marker.
+pub(crate) fn indent_after(tokenizer: &mut Tokenizer) -> State {
+    let options = tokenizer.parse_state.options;
+    let (start, column) = (tokenizer.point.index, tokenizer.point.column);
+    let events = tokenizer.events.len();
+    let state = ext_mut(tokenizer);
+    let (construct, place) = construct(options, state.index);
+    state.indent = column - state.indent;
+    state.start = start;
+    state.events = events;
+    state.steps = 0;
+    state.at = start;
+    state.furthest = start;
+
+    match tokenizer.current {
+        // In flow, spaces and tabs are indentation.
+        Some(b'\t' | b' ') if place == Place::Flow => State::Nok,
+        Some(byte) if byte != b'\n' && construct.markers().contains(&byte) => {
+            State::Retry(StateName::ExtensionStep)
+        }
+        _ => State::Nok,
+    }
+}
+
+/// After a flow line ending that continues the construct: consume it.
+///
+/// Line endings in flow are real, so containers can count lines; in content,
+/// they are linked chunks.
+pub(crate) fn at_non_lazy(tokenizer: &mut Tokenizer) -> State {
+    // The end right after this line ending, the last byte, is like a lazy
+    // line.
+    if tokenizer.point.index + 1 == tokenizer.parse_state.bytes.len() {
+        return at_lazy(tokenizer);
+    }
+
+    if is_content_top(tokenizer) {
+        let content = content_of_top(tokenizer);
+        if is_chunk_open(tokenizer) {
+            exit_chunk(tokenizer);
+        }
+        enter_chunk(tokenizer, Name::LineEnding, content);
+        let line = tokenizer.point.line;
+        let state = ext_mut(tokenizer);
+        state.content_line = line;
+        state.content_blank = true;
+    } else {
+        tokenizer.enter(Name::LineEnding);
+    }
+    tokenizer.consume();
+    tokenizer.exit(Name::LineEnding);
+    State::Next(StateName::ExtensionStep)
+}
+
+/// After a flow line ending followed by a lazy line or the end.
+pub(crate) fn at_lazy(tokenizer: &mut Tokenizer) -> State {
+    ext_mut(tokenizer).line = FlowLine::Lazy;
     State::Retry(StateName::ExtensionStep)
 }
 
@@ -685,15 +819,91 @@ pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
     tokenize_state.furthest = tokenize_state.furthest.max(point);
     // Work is linear in the bytes a match reaches, whatever its attempts do.
     let budget = STEP_MAX.saturating_mul(tokenize_state.furthest - tokenize_state.start + 1);
-    if tokenize_state.steps > budget {
-        return State::Nok;
-    }
+    let index = tokenize_state.index;
+    let place = construct(tokenizer.parse_state.options, index).1;
+    let is_flow = place == Place::Flow;
+    let (step, line_ending) = if ext(tokenizer).steps > budget {
+        (Step::Nok, false)
+    } else {
+        run(tokenizer, index, place)
+    };
+    let in_attempt = !ext(tokenizer).attempts.is_empty();
 
-    let (index, state) = (tokenize_state.index, tokenize_state.state);
-    let construct = construct(tokenizer.parse_state.options, index);
+    match step {
+        Step::Next(state) => {
+            ext_mut(tokenizer).state = state;
+
+            // Past its first line, a flow construct matches or errors, and
+            // containers must not start in the next line while it is checked.
+            if is_flow && line_ending {
+                ext_mut(tokenizer).line = FlowLine::Committed;
+                tokenizer.concrete = true;
+                tokenizer.check(
+                    State::Next(StateName::ExtensionNonLazy),
+                    State::Next(StateName::ExtensionLazy),
+                );
+                return State::Retry(StateName::NonLazyContinuationStart);
+            }
+
+            State::Next(StateName::ExtensionStep)
+        }
+        Step::Retry(state) => {
+            ext_mut(tokenizer).state = state;
+            State::Retry(StateName::ExtensionStep)
+        }
+        Step::Attempt { state, ok, nok } => {
+            let line_start = tokenizer.line_start.clone();
+            let tokenize_state = ext_mut(tokenizer);
+            tokenize_state.state = state;
+            let frame = AttemptFrame {
+                ok,
+                nok,
+                open_len: tokenize_state.open.len(),
+                line_start,
+                content_line: tokenize_state.content_line,
+                content_blank: tokenize_state.content_blank,
+                last_chunk: tokenize_state.last_chunk,
+            };
+            tokenize_state.attempts.push(frame);
+            tokenizer.attempt(
+                State::Next(StateName::ExtensionAttemptOk),
+                State::Next(StateName::ExtensionAttemptNok),
+            );
+            State::Retry(StateName::ExtensionStep)
+        }
+        Step::Ok => {
+            if is_flow && !in_attempt {
+                tokenizer.interrupt = false;
+                tokenizer.concrete = false;
+            }
+            State::Ok
+        }
+        Step::Nok => {
+            if in_attempt {
+                return State::Nok;
+            }
+            if ext(tokenizer).line != FlowLine::First {
+                return State::Error(message::Message {
+                    place: Some(Box::new(message::Place::Point(tokenizer.point.to_unist()))),
+                    reason: "Unexpected failure of a flow construct after its first line".into(),
+                    rule_id: Box::new("flow-construct-late-failure".into()),
+                    source: Box::new("markdown-rs".into()),
+                });
+            }
+            State::Nok
+        }
+    }
+}
+
+/// Take a step of construct `index`, and turn a step that breaks a rule of
+/// [`Construct`] into `Nok`; also whether it consumed a line ending.
+fn run(tokenizer: &mut Tokenizer, index: u8, place: Place) -> (Step, bool) {
+    let state = ext(tokenizer).state;
+    let construct = construct(tokenizer.parse_state.options, index).0;
     let mut construct_tokenizer = ConstructTokenizer {
         tokenizer,
         index,
+        place,
         consumed: false,
         line_ending: false,
         broken: false,
@@ -722,45 +932,17 @@ pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
         Step::Ok
             if attempt.is_none()
                 && (tokenizer.point.index <= tokenize_state.start
-                    || !tokenize_state.open.is_empty()) =>
+                    || !tokenize_state.open.is_empty()
+                    // A flow construct ends at a line ending or the end.
+                    || (place == Place::Flow
+                        && (consumed || !matches!(tokenizer.current, None | Some(b'\n'))))) =>
         {
             Step::Nok
         }
         step => step,
     };
 
-    match step {
-        Step::Next(state) => {
-            ext_mut(tokenizer).state = state;
-            State::Next(StateName::ExtensionStep)
-        }
-        Step::Retry(state) => {
-            ext_mut(tokenizer).state = state;
-            State::Retry(StateName::ExtensionStep)
-        }
-        Step::Attempt { state, ok, nok } => {
-            let line_start = tokenizer.line_start.clone();
-            let tokenize_state = ext_mut(tokenizer);
-            tokenize_state.state = state;
-            let frame = AttemptFrame {
-                ok,
-                nok,
-                open_len: tokenize_state.open.len(),
-                line_start,
-                content_line: tokenize_state.content_line,
-                content_blank: tokenize_state.content_blank,
-                last_chunk: tokenize_state.last_chunk,
-            };
-            tokenize_state.attempts.push(frame);
-            tokenizer.attempt(
-                State::Next(StateName::ExtensionAttemptOk),
-                State::Next(StateName::ExtensionAttemptNok),
-            );
-            State::Retry(StateName::ExtensionStep)
-        }
-        Step::Ok => State::Ok,
-        Step::Nok => State::Nok,
-    }
+    (step, line_ending)
 }
 
 /// Whether `event` is of a token of a construct in content, such as a line

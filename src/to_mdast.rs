@@ -1879,7 +1879,9 @@ fn on_enter_extension(context: &mut CompileContext) {
 /// Lets the construct make one node of the match, which is added as a child.
 fn on_exit_extension(context: &mut CompileContext) {
     let done = context.extension_matches.pop().expect("expected a match");
-    let mut node = construct(context.options, done.construct).to_mdast(done.tokens);
+    let mut node = construct(context.options, done.construct)
+        .0
+        .to_mdast(done.tokens);
 
     if node.position().is_none() {
         node.position_set(Some(Position {

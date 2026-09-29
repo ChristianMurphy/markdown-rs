@@ -322,14 +322,15 @@ Opera 12 (from 2012) is a notable browser that did not respect this.
 An aspect related to XSS for security is syntax errors:
 markdown itself has no syntax errors.
 Some syntax extensions
-(specifically, only MDX)
+(specifically, MDX,
+and flow constructs passed in options that fail after their first line)
 do include syntax errors.
 For that reason,
 `to_html_with_options` returns `Result<String, Message>`,
 of which the error is a struct indicating where the problem happened,
 what occurred,
 and what was expected instead.
-Make sure to handle your errors when using MDX.
+Make sure to handle your errors when using MDX or flow constructs.
 
 Another security aspect is DDoS attacks.
 For example,
