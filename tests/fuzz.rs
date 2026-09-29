@@ -1,28 +1,10 @@
-use markdown::{mdast, message, to_html, to_html_with_options, to_mdast, Options, ParseOptions};
+use markdown::{
+    mdast::{self, Code, List, ListItem, Node, Paragraph, Root, Text},
+    message, to_html, to_html_with_options, to_mdast,
+    unist::Position,
+    Options,
+};
 use pretty_assertions::assert_eq;
-
-/// Walk an mdast subtree and assert that every parent node's recorded
-/// position fully envelops every positioned child's recorded position.
-/// Returns `Err((parent_kind, parent_end, child_kind, child_end))` on the
-/// first violation; `Ok(())` if the whole subtree is well-formed.
-fn assert_position_envelop(node: &mdast::Node) -> Result<(), (String, usize, String, usize)> {
-    fn kind(n: &mdast::Node) -> String {
-        let s = format!("{:?}", n);
-        s.split(['(', ' ', '{']).next().unwrap_or(&s).to_string()
-    }
-    let parent_pos = node.position().cloned();
-    if let Some(children) = node.children() {
-        for child in children {
-            if let (Some(p), Some(c)) = (parent_pos.as_ref(), child.position()) {
-                if c.end.offset > p.end.offset || c.start.offset < p.start.offset {
-                    return Err((kind(node), p.end.offset, kind(child), c.end.offset));
-                }
-            }
-            assert_position_envelop(child)?;
-        }
-    }
-    Ok(())
-}
 
 #[test]
 fn fuzz() -> Result<(), message::Message> {
@@ -152,16 +134,72 @@ fn fuzz() -> Result<(), message::Message> {
         "12: mdx: handle invalid mdx without panic (GH-26)"
     );
 
-    let bullet = to_mdast("- ```\n\nx\n", &ParseOptions::default())?;
-    assert!(
-        assert_position_envelop(&bullet).is_ok(),
-        "13: bullet list with unclosed fenced code and trailing paragraph: list-item position must envelop fenced-code child"
+    assert_eq!(
+        to_mdast("- ```\n\nx\n", &Default::default())?,
+        Node::Root(Root {
+            children: vec![
+                Node::List(List {
+                    ordered: false,
+                    spread: false,
+                    start: None,
+                    children: vec![Node::ListItem(ListItem {
+                        checked: None,
+                        spread: false,
+                        children: vec![Node::Code(Code {
+                            lang: None,
+                            meta: None,
+                            value: "".into(),
+                            position: Some(Position::new(1, 3, 2, 2, 1, 6))
+                        })],
+                        position: Some(Position::new(1, 1, 0, 2, 1, 6))
+                    })],
+                    position: Some(Position::new(1, 1, 0, 2, 1, 6))
+                }),
+                Node::Paragraph(Paragraph {
+                    children: vec![Node::Text(Text {
+                        value: "x".into(),
+                        position: Some(Position::new(3, 1, 7, 3, 2, 8))
+                    })],
+                    position: Some(Position::new(3, 1, 7, 3, 2, 8))
+                })
+            ],
+            position: Some(Position::new(1, 1, 0, 4, 1, 9))
+        }),
+        "13-a: unclosed fenced code, blank line, and lazy line in a list item (GH-205)"
     );
 
-    let ordered = to_mdast("1. ```\n\nx\n", &ParseOptions::default())?;
-    assert!(
-        assert_position_envelop(&ordered).is_ok(),
-        "14: ordered list with unclosed fenced code and trailing paragraph: list-item position must envelop fenced-code child"
+    assert_eq!(
+        to_mdast("- ```\r\n\r\nx\r\n", &Default::default())?,
+        Node::Root(Root {
+            children: vec![
+                Node::List(List {
+                    ordered: false,
+                    spread: false,
+                    start: None,
+                    children: vec![Node::ListItem(ListItem {
+                        checked: None,
+                        spread: false,
+                        children: vec![Node::Code(Code {
+                            lang: None,
+                            meta: None,
+                            value: "".into(),
+                            position: Some(Position::new(1, 3, 2, 2, 1, 7))
+                        })],
+                        position: Some(Position::new(1, 1, 0, 2, 1, 7))
+                    })],
+                    position: Some(Position::new(1, 1, 0, 2, 1, 7))
+                }),
+                Node::Paragraph(Paragraph {
+                    children: vec![Node::Text(Text {
+                        value: "x".into(),
+                        position: Some(Position::new(3, 1, 9, 3, 2, 10))
+                    })],
+                    position: Some(Position::new(3, 1, 9, 3, 2, 10))
+                })
+            ],
+            position: Some(Position::new(1, 1, 0, 4, 1, 12))
+        }),
+        "13-b: unclosed fenced code, blank line, and lazy line in a list item, with CRLF (GH-205)"
     );
 
     Ok(())
