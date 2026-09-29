@@ -26,13 +26,16 @@
 
 use crate::construct::gfm_autolink_literal::resolve as resolve_gfm_autolink_literal;
 use crate::construct::partial_whitespace::resolve_whitespace;
+use crate::event::{Kind, Name};
+use crate::extension::{ext, ext_mut, start as start_construct};
 use crate::resolve::Name as ResolveName;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::Subresult;
 use crate::tokenizer::Tokenizer;
+use core::convert::TryFrom;
 
 /// Characters that can start something in text.
-const MARKERS: [u8; 16] = [
+pub const MARKERS: [u8; 16] = [
     b'!',  // `label_start_image`
     b'$',  // `raw_text` (math (text))
     b'&',  // `character_reference`
@@ -62,7 +65,12 @@ const MARKERS: [u8; 16] = [
 ///     ^
 /// ```
 pub fn start(tokenizer: &mut Tokenizer) -> State {
-    tokenizer.tokenize_state.markers = &MARKERS;
+    let parse_state = tokenizer.parse_state;
+    tokenizer.tokenize_state.markers = if parse_state.text_markers.is_empty() {
+        &MARKERS
+    } else {
+        &parse_state.text_markers
+    };
     tokenizer.attempt(
         State::Next(StateName::TextBefore),
         State::Next(StateName::TextBefore),
@@ -77,6 +85,73 @@ pub fn start(tokenizer: &mut Tokenizer) -> State {
 ///     ^
 /// ```
 pub fn before(tokenizer: &mut Tokenizer) -> State {
+    if tokenizer.parse_state.options.text_constructs.is_empty() {
+        before_builtin(tokenizer)
+    } else {
+        before_construct(tokenizer, 0)
+    }
+}
+
+/// Before constructs of syntax extensions, trying the one at `index` and
+/// later.
+///
+/// ```markdown
+/// > | @a
+///     ^
+/// ```
+pub fn before_construct(tokenizer: &mut Tokenizer, index: u8) -> State {
+    let constructs = &tokenizer.parse_state.options.text_constructs;
+    let mut index = usize::from(index);
+
+    // Container prefixes are not text, and an escaped character is not
+    // markup before a construct, like micromark checking for
+    // `characterEscape`.
+    let previous = match tokenizer.events.last() {
+        _ if tokenizer.at_line_start() => Some(b'\n'),
+        Some(event) if event.kind == Kind::Exit && event.name == Name::CharacterEscape => None,
+        _ => tokenizer.previous,
+    };
+
+    if let Some(byte) = tokenizer.current {
+        while index < constructs.len() {
+            if byte != b'\n'
+                && constructs[index].markers().contains(&byte)
+                && constructs[index].previous(previous)
+            {
+                // Parsing checks that there are at most 255 constructs.
+                let next = u8::try_from(index + 1).expect("expected at most 255 constructs");
+                ext_mut(tokenizer).next = next;
+                tokenizer.attempt(
+                    State::Next(StateName::TextBefore),
+                    State::Next(StateName::TextBeforeConstructNext),
+                );
+                return start_construct(tokenizer, next - 1);
+            }
+            index += 1;
+        }
+    }
+
+    before_builtin(tokenizer)
+}
+
+/// Before constructs of syntax extensions, after one did not match.
+///
+/// ```markdown
+/// > | @b
+///     ^
+/// ```
+pub fn before_construct_next(tokenizer: &mut Tokenizer) -> State {
+    let next = ext(tokenizer).next;
+    before_construct(tokenizer, next)
+}
+
+/// Before built-in constructs.
+///
+/// ```markdown
+/// > | abc
+///     ^
+/// ```
+pub fn before_builtin(tokenizer: &mut Tokenizer) -> State {
     match tokenizer.current {
         None => {
             tokenizer.register_resolver(ResolveName::Data);
