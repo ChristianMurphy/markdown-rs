@@ -3,8 +3,9 @@
 //! A construct is a state machine driven by the built-in tokenizer, like a
 //! micromark construct, so it sees text without container prefixes such as
 //! `> `, across lines.
-//! Pass constructs in `text_constructs` and `flow_constructs` of
-//! [`ParseOptions`], each wrapped by [`construct()`].
+//! Pass constructs in `text_constructs`, `flow_constructs`, and
+//! `document_constructs` of [`ParseOptions`], each wrapped by
+//! [`construct()`].
 //!
 //! [`to_mdast()`][crate::to_mdast()] turns each match into a node with
 //! [`Construct::to_mdast`].
@@ -15,7 +16,9 @@
 //! [`Consumed::next`], so it cannot forget to consume or consume twice;
 //! [`Ctx::exit`] closes the innermost token, so it cannot close the wrong
 //! one; a flow construct ends before its line ending, so it has no
-//! [`Consumed::ok`]; and a construct goes in the list of its [`Place`].
+//! [`Consumed::ok`]; a container keeps a state for its later lines, which
+//! only it can give, with [`Ctx::container`]; and a construct goes in the
+//! list of its [`Place`].
 //! The rules that depend on the input are checked as the construct runs,
 //! as [`Construct`] lists them.
 //!
@@ -249,6 +252,30 @@
 //! # }
 //! ```
 //!
+//! Only a container keeps a state for its next line:
+//!
+//! ```compile_fail,E0599
+//! # use markdown::extension::{Construct, Ctx, Step, Text, Token, TokenType};
+//! # #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+//! # enum T { A }
+//! # impl TokenType for T {
+//! #     const ALL: &'static [Self] = &[T::A];
+//! #     fn name(self) -> &'static str { "a" }
+//! # }
+//! # struct C;
+//! # impl Construct for C {
+//! #     type Place = Text;
+//! #     type State = u8;
+//! #     type Token = T;
+//! #     fn markers(&self) -> &[u8] { b"a" }
+//! #     fn start(&self) -> u8 { 0 }
+//! #     fn to_mdast(&self, _: Vec<Token<'_, T>>) -> markdown::mdast::Node { unimplemented!() }
+//! fn step(&self, state: u8, t: Ctx<'_, '_, Self>) -> Step<Self> {
+//!     t.enter(T::A).consume().exit().container(1)
+//! }
+//! # }
+//! ```
+//!
 //! A construct goes in the list of its place:
 //!
 //! ```compile_fail,E0308
@@ -281,7 +308,7 @@ use crate::mdast;
 use crate::message;
 use crate::state::{Name as StateName, State};
 use crate::subtokenize::link_to;
-use crate::tokenizer::{move_point_back, Tokenizer};
+use crate::tokenizer::{move_point_back, Container as TokenizerContainer, Tokenizer};
 use crate::unist::Position;
 use crate::util::constant::TAB_SIZE;
 use crate::util::slice::{Position as SlicePosition, Slice};
@@ -304,8 +331,11 @@ mod sealed {
     /// Only this crate defines places.
     pub trait Sealed {}
 
-    /// Places where a match can end with a consumed byte.
+    /// Places where a match, or an attempt, can end with a consumed byte.
     pub trait OkAfterConsume {}
+
+    /// Containers.
+    pub trait IsContainer {}
 }
 
 /// Where a construct runs.
@@ -316,9 +346,11 @@ pub enum PlaceKind {
     Text,
     /// At the start of a line in flow.
     Flow,
+    /// A container.
+    Container,
 }
 
-/// Where a construct runs: [`Text`] or [`Flow`].
+/// Where a construct runs: [`Text`], [`Flow`], or [`Container`].
 ///
 /// A construct names its place in [`Construct::Place`], and goes in the
 /// list of options for that place, so it cannot run anywhere else.
@@ -356,6 +388,36 @@ impl Place for Flow {
     const KIND: PlaceKind = PlaceKind::Flow;
 }
 
+/// A container at the start of a line, such as a block quote: constructs
+/// in [`ParseOptions::document_constructs`][crate::ParseOptions].
+///
+/// A container matches the prefix of its first line, after up to 3 columns
+/// of indentation, and ends with [`Ctx::container`], with its first token
+/// and a token of document content open, which holds the rest of the
+/// container.
+/// Before that, its first line can hold text content, such as the title of
+/// an admonition.
+/// The state it gives checks the prefix of each later line, like
+/// micromark’s `continuation`: [`Ctx::container`] continues the container,
+/// with a state for the line after, and `nok` ends it, though a lazy line
+/// can still continue a paragraph in it.
+/// A later line starts before its indentation, which the state takes
+/// itself, as micromark’s block quote does, a column at a time, as
+/// [`Ctx::current`] describes for tabs.
+#[derive(Clone, Copy, Debug)]
+pub enum Container {}
+
+impl sealed::Sealed for Container {}
+
+impl Place for Container {
+    const KIND: PlaceKind = PlaceKind::Container;
+}
+
+// In an attempt, such as one that tries a prefix.
+impl sealed::OkAfterConsume for Container {}
+
+impl sealed::IsContainer for Container {}
+
 /// Names of the tokens of a construct.
 ///
 /// Usually an enum without data, such as `enum MentionToken { Mention, Name }`.
@@ -387,9 +449,11 @@ pub trait TokenType: Copy + Eq + fmt::Debug + 'static {
 pub enum ContentType {
     /// Phrasing, such as a label.
     Text,
-    /// Blocks, such as the body of a container (flow constructs only: a
-    /// text construct that enters such a token breaks the rule
-    /// `document-content-in-text`).
+    /// Blocks, such as the body of a container (flow constructs and
+    /// containers only: a text construct that enters such a token breaks
+    /// the rule `document-content-in-text`).
+    /// A container can enter text content on its first line only, such as a
+    /// title, and breaks `text-content-in-container` on a later line.
     Document,
 }
 
@@ -420,10 +484,12 @@ pub enum Reach {
 /// A construct, such as a mention.
 ///
 /// Constructs in [`ParseOptions::text_constructs`][crate::ParseOptions] run
-/// in text, and those in `flow_constructs` at the start of a line in flow,
-/// after up to 3 columns of indentation.
+/// in text, those in `flow_constructs` at the start of a line in flow, and
+/// those in `document_constructs` at the start of a line as containers, such
+/// as block quotes; flow constructs and containers start after up to 3
+/// columns of indentation.
 /// They are tried in order, before built-ins, at their markers, which are
-/// never line endings, and in flow never spaces or tabs, which are
+/// never line endings, and outside text never spaces or tabs, which are
 /// indentation.
 ///
 /// A construct that breaks one of these rules does not match, so its bytes
@@ -439,10 +505,19 @@ pub enum Reach {
 /// * text content has no blank line between lines with other bytes, like a
 ///   paragraph, though it can start or end with blank lines
 ///   (`blank-line-in-content`)
-/// * document content is in flow constructs only
+/// * document content is in flow constructs and containers only
 ///   (`document-content-in-text`), and a line ending in it is content: a
 ///   token in document content does not consume one
 ///   (`line-ending-in-document`)
+/// * a container enters text content on its first line only
+///   (`text-content-in-container`), consumes no line ending
+///   (`line-ending-in-container`), and leaves the rest of its first line to
+///   its document content (`consume-in-container-content`); its tokens on
+///   later lines are in its content, like `> `
+/// * a container ends its first line with its token and its content token
+///   open, and a later line with its tokens closed, maybe without bytes
+///   (`container-tokens`), with [`Ctx::container`], not `ok`
+///   (`ok-in-container`), and not in an attempt (`container-in-attempt`)
 /// * inside content, a token holds no content (`content-in-content`), and
 ///   starts before the content of its line, like a line prefix
 ///   (`token-after-content`)
@@ -459,8 +534,9 @@ pub enum Reach {
 ///   opened closed
 /// * tokens start and end between characters, not inside one; a tab is
 ///   one character, but a line can start inside it, after container
-///   prefixes, and a token in document content, such as a line prefix, can
-///   take part of it, as the indent of fenced code can
+///   prefixes, a container prefix can take part of it, and so can a token
+///   in document content, such as a line prefix, as the indent of fenced
+///   code can
 ///   (`token-inside-character`)
 ///
 /// A match takes at most 256 steps for each byte from its start through the
@@ -478,7 +554,7 @@ pub enum Reach {
 /// of a flow construct is a parse error, so deep document content anywhere
 /// leaves fewer levels for text content.
 pub trait Construct: 'static {
-    /// Where the construct runs: [`Text`] or [`Flow`].
+    /// Where the construct runs: [`Text`], [`Flow`], or [`Container`].
     type Place: Place;
     /// States of the construct, usually an enum; a variant can carry what
     /// the construct has seen, such as the size of an opening fence.
@@ -503,9 +579,9 @@ pub trait Construct: 'static {
     /// In text, it is `None` at the start, such as the first line of a
     /// paragraph, `'\n'` at the start of a later line, after container
     /// prefixes, and `None` after a character escape.
-    /// In flow, it is `None` on the first line of the document, and
-    /// `'\n'` on a later line, before indentation and after container
-    /// prefixes.
+    /// In flow and containers, it is `None` on the first line of the
+    /// document, and `'\n'` on a later line, before indentation and after
+    /// the prefixes of outer containers.
     fn previous(&self, previous: Option<char>) -> bool {
         let _ = previous;
         true
@@ -533,8 +609,9 @@ impl<P: Place> fmt::Debug for BoxedConstruct<P> {
 }
 
 /// Wrap a construct, to pass it in the options for its place:
-/// [`ParseOptions::text_constructs`][crate::ParseOptions] for [`Text`], and
-/// `flow_constructs` for [`Flow`].
+/// [`ParseOptions::text_constructs`][crate::ParseOptions] for [`Text`],
+/// `flow_constructs` for [`Flow`], and `document_constructs` for
+/// [`Container`].
 pub fn construct<C: Construct>(construct: C) -> BoxedConstruct<C::Place> {
     BoxedConstruct {
         inner: Box::new(Wrap(construct)),
@@ -559,6 +636,7 @@ enum StepKind<S> {
     Next(S),
     Retry(S),
     Attempt { state: S, ok: S, nok: S },
+    Container(S),
     Ok,
     Nok,
 }
@@ -616,6 +694,7 @@ enum RawStep {
     Next,
     Retry,
     Attempt,
+    Container,
     Ok,
     Nok,
 }
@@ -628,6 +707,10 @@ trait ErasedConstruct {
     fn reach(&self) -> Reach;
     fn previous(&self, previous: Option<char>) -> bool;
     fn token_count(&self) -> usize;
+    /// Take the state a container gave for its next line out of `slot`.
+    fn take_container(&self, slot: &mut Option<Box<dyn Any>>) -> Box<dyn Any>;
+    /// Put the state of a container for this line, `state`, in `slot`.
+    fn resume_container(&self, slot: &mut Option<Box<dyn Any>>, state: &dyn Any);
     /// Put the start state in `slot`.
     fn start(&self, slot: &mut Option<Box<dyn Any>>);
     /// Take a step from the state in `slot`, and store the next one there.
@@ -646,6 +729,8 @@ struct Machine<S> {
     state: Option<S>,
     /// The `ok` and `nok` states of the attempts it is in.
     attempts: Vec<(S, S)>,
+    /// The state a container gave for its next line.
+    container: Option<S>,
 }
 
 impl<C: Construct> ErasedConstruct for Wrap<C> {
@@ -671,6 +756,42 @@ impl<C: Construct> ErasedConstruct for Wrap<C> {
         C::Token::ALL.len() * 2
     }
 
+    fn take_container(&self, slot: &mut Option<Box<dyn Any>>) -> Box<dyn Any> {
+        let machine = slot
+            .as_mut()
+            .and_then(|slot| slot.downcast_mut::<Machine<C::State>>())
+            .expect("expected state of construct");
+        Box::new(
+            machine
+                .container
+                .take()
+                .expect("expected state of container"),
+        )
+    }
+
+    fn resume_container(&self, slot: &mut Option<Box<dyn Any>>, state: &dyn Any) {
+        let state = state
+            .downcast_ref::<C::State>()
+            .expect("expected state of container")
+            .clone();
+        match slot
+            .as_mut()
+            .and_then(|slot| slot.downcast_mut::<Machine<C::State>>())
+        {
+            Some(machine) => {
+                machine.state = Some(state);
+                machine.attempts.clear();
+            }
+            None => {
+                *slot = Some(Box::new(Machine {
+                    state: Some(state),
+                    attempts: Vec::new(),
+                    container: None,
+                }));
+            }
+        }
+    }
+
     fn start(&self, slot: &mut Option<Box<dyn Any>>) {
         let state = Some(self.0.start());
         match slot
@@ -687,6 +808,7 @@ impl<C: Construct> ErasedConstruct for Wrap<C> {
                 *slot = Some(Box::new(Machine {
                     state,
                     attempts: Vec::new(),
+                    container: None,
                 }));
             }
         }
@@ -718,6 +840,10 @@ impl<C: Construct> ErasedConstruct for Wrap<C> {
                 machine.state = Some(state);
                 machine.attempts.push((ok, nok));
                 RawStep::Attempt
+            }
+            StepKind::Container(state) => {
+                machine.container = Some(state);
+                RawStep::Container
             }
             StepKind::Ok => RawStep::Ok,
             StepKind::Nok => RawStep::Nok,
@@ -809,6 +935,11 @@ pub(crate) struct ExtensionState {
     line: FlowLine,
     /// Columns of indentation before the current flow construct.
     indent: usize,
+    /// Whether the current match checks whether a container continues.
+    continuation: bool,
+    /// States that containers gave for their next lines; a container keeps
+    /// the index of its own in `size`.
+    containers: Vec<Box<dyn Any>>,
 }
 
 /// Where a flow construct is in its lines.
@@ -913,6 +1044,8 @@ impl<'t, 'a, C: Construct + ?Sized> Ctx<'t, 'a, C> {
     /// Current byte, or `None` at the end.
     ///
     /// Line endings (CR, LF, CR+LF) are all `b'\n'`.
+    /// A tab is `b'\t'` at its first column and `b' '` at each column after,
+    /// and `consume` takes one column.
     /// In flow, a line ending before a lazy line or the end is `None`: the
     /// construct ends there.
     pub fn current(&self) -> Option<u8> {
@@ -943,8 +1076,9 @@ impl<'t, 'a, C: Construct + ?Sized> Ctx<'t, 'a, C> {
         self.inner.tokenizer.parse_state.options
     }
 
-    /// Columns of indentation (0 to 3) before a flow construct, which it
-    /// starts after, like micromark’s `linePrefix`; `0` in text.
+    /// Columns of indentation (0 to 3) before a flow construct or container,
+    /// which it starts after, like micromark’s `linePrefix`; `0` in text and
+    /// on later lines of a container.
     pub fn indent(&self) -> usize {
         ext(self.inner.tokenizer).indent
     }
@@ -1045,12 +1179,43 @@ impl<C: Construct + ?Sized> Consumed<'_, '_, C> {
     }
 }
 
+impl<C: Construct + ?Sized> Ctx<'_, '_, C>
+where
+    C::Place: sealed::IsContainer,
+{
+    /// The container matched its first line, or continues on a later line:
+    /// `state` checks the prefix of the next line.
+    #[must_use]
+    pub fn container(self, state: C::State) -> Step<C> {
+        Step {
+            kind: StepKind::Container(state),
+            report: self.inner.report,
+        }
+    }
+}
+
+impl<C: Construct + ?Sized> Consumed<'_, '_, C>
+where
+    C::Place: sealed::IsContainer,
+{
+    /// The container matched its first line, or continues on a later line,
+    /// ending with the consumed byte: `state` checks the prefix of the next
+    /// line.
+    #[must_use]
+    pub fn container(self, state: C::State) -> Step<C> {
+        Step {
+            kind: StepKind::Container(state),
+            report: self.inner.report,
+        }
+    }
+}
+
 impl<C: Construct + ?Sized> Consumed<'_, '_, C>
 where
     C::Place: sealed::OkAfterConsume,
 {
-    /// The construct matched, ending with the consumed byte; in text only,
-    /// as a flow construct ends before its line ending.
+    /// The construct, or an attempt, matched, ending with the consumed byte;
+    /// not in flow, as a flow construct ends before its line ending.
     #[must_use]
     pub fn ok(mut self) -> Step<C> {
         if self.inner.report.line_ending {
@@ -1087,12 +1252,14 @@ fn enter<T: TokenType>(inner: &mut Inner, token: T) {
         ContentType::Text => Content::Text,
         ContentType::Document => Content::Document,
     });
-    let inside_content = state.open.get(state.content_at).map_or(false, |id| {
-        matches!(
-            tokenizer.parse_state.extension_names.borrow()[usize::from(*id)].3,
-            TokenKind::Content(_)
-        )
-    });
+    // A container continues in its content.
+    let inside_content = state.continuation
+        || state.open.get(state.content_at).map_or(false, |id| {
+            matches!(
+                tokenizer.parse_state.extension_names.borrow()[usize::from(*id)].3,
+                TokenKind::Content(_)
+            )
+        });
     let is_content = content.is_some();
     let is_document = content == Some(Content::Document);
     let kind = match content {
@@ -1110,6 +1277,13 @@ fn enter<T: TokenType>(inner: &mut Inner, token: T) {
     } else if is_document && inner.place == PlaceKind::Text {
         // Document content is parsed before text, so text cannot hold it.
         Some("document-content-in-text")
+    } else if is_content
+        && !is_document
+        && inner.place == PlaceKind::Container
+        && ext(tokenizer).continuation
+    {
+        // Tokens of a later line are prefixes in the document content.
+        Some("text-content-in-container")
     } else if inside_content && is_content {
         Some("content-in-content")
     } else if !can_start {
@@ -1123,14 +1297,18 @@ fn enter<T: TokenType>(inner: &mut Inner, token: T) {
         Some("token-after-content")
     } else if !at_boundary(
         tokenizer,
+        inner.place,
         open_content(tokenizer) == Some(Content::Document),
     ) {
         Some("token-inside-character")
     } else {
         None
     };
-    // A limit, not a rule: the content does not match.
-    let is_too_deep = is_content && tokenizer.parse_state.content_depth >= CONTENT_MAX;
+    // A limit, not a rule: the content does not match. The content of a
+    // container is parsed with the container.
+    let is_too_deep = is_content
+        && inner.place != PlaceKind::Container
+        && tokenizer.parse_state.content_depth >= CONTENT_MAX;
 
     if let Some(rule) = rule {
         inner.broke(rule);
@@ -1185,7 +1363,7 @@ fn exit(inner: &mut Inner) {
         }
         None => Some("exit-without-token"),
         Some(_) if is_before_attempt => Some("exit-before-attempt"),
-        Some(_) if !at_boundary(tokenizer, is_in_document_content(tokenizer)) => {
+        Some(_) if !at_boundary(tokenizer, inner.place, is_in_document_content(tokenizer)) => {
             Some("token-inside-character")
         }
         _ => None,
@@ -1266,9 +1444,26 @@ fn consume(inner: &mut Inner) {
         }
     }
 
-    // The line endings of a document go to the document.
+    // The line endings of a document go to the document, and a container
+    // leaves the rest of its lines to its content.
     if is_eol && !in_content && open_content(inner.tokenizer) == Some(Content::Document) {
-        inner.broke("line-ending-in-document");
+        let rule = if inner.place == PlaceKind::Container {
+            "line-ending-in-container"
+        } else {
+            "line-ending-in-document"
+        };
+        inner.broke(rule);
+        return;
+    }
+    // Text content, such as a title, takes bytes of the first line.
+    let in_document = in_content && content_of_top(inner.tokenizer) == Content::Document;
+    if inner.place == PlaceKind::Container && (is_eol || in_document) {
+        let rule = if is_eol {
+            "line-ending-in-container"
+        } else {
+            "consume-in-container-content"
+        };
+        inner.broke(rule);
         return;
     }
 
@@ -1417,12 +1612,12 @@ fn is_in_document_content(tokenizer: &Tokenizer) -> bool {
 }
 
 /// Whether the tokenizer is between characters: not in a UTF-8 sequence, and
-/// not in a tab, unless a line starts there after container prefixes, or the
-/// token is in document content, such as a line prefix that takes part of a
-/// tab, as the indent of fenced code does.
-fn at_boundary(tokenizer: &Tokenizer, in_document: bool) -> bool {
+/// not in a tab, unless a line starts there after container prefixes, in
+/// the prefix of a container, or the token is in document content, such as a
+/// line prefix that takes part of a tab, as the indent of fenced code does.
+fn at_boundary(tokenizer: &Tokenizer, place: PlaceKind, in_document: bool) -> bool {
     let point = &tokenizer.point;
-    (point.vs == 0 || in_document || tokenizer.at_line_start())
+    (point.vs == 0 || place == PlaceKind::Container || in_document || tokenizer.at_line_start())
         && tokenizer
             .parse_state
             .bytes
@@ -1543,7 +1738,9 @@ fn open_content(tokenizer: &Tokenizer) -> Option<Content> {
 pub(crate) fn token_count(options: &ParseOptions) -> usize {
     let text = options.text_constructs.iter().map(|c| &c.inner);
     let flow = options.flow_constructs.iter().map(|c| &c.inner);
+    let containers = options.document_constructs.iter().map(|c| &c.inner);
     text.chain(flow)
+        .chain(containers)
         .map(|construct| construct.token_count())
         .sum()
 }
@@ -1563,13 +1760,18 @@ pub(crate) fn to_mdast(options: &ParseOptions, index: u8, tokens: Vec<RawToken>)
     erased(options, index).to_mdast(tokens)
 }
 
-/// Construct at `index`: text constructs, then flow.
+/// Construct at `index`: text constructs, then flow, then containers.
 fn erased(options: &ParseOptions, index: u8) -> &dyn ErasedConstruct {
-    let index = usize::from(index);
-    match options.text_constructs.get(index) {
-        Some(construct) => &*construct.inner,
-        None => &*options.flow_constructs[index - options.text_constructs.len()].inner,
+    let mut index = usize::from(index);
+    if index < options.text_constructs.len() {
+        return &*options.text_constructs[index].inner;
     }
+    index -= options.text_constructs.len();
+    if index < options.flow_constructs.len() {
+        return &*options.flow_constructs[index].inner;
+    }
+    index -= options.flow_constructs.len();
+    &*options.document_constructs[index].inner
 }
 
 /// Start trying construct `index`.
@@ -1583,8 +1785,9 @@ pub(crate) fn start(tokenizer: &mut Tokenizer, index: u8) -> State {
     state.last_chunk = None;
     state.line = FlowLine::First;
     state.indent = column;
+    state.continuation = false;
 
-    if erased(options, index).place() == PlaceKind::Flow
+    if erased(options, index).place() != PlaceKind::Text
         && matches!(tokenizer.current, Some(b'\t' | b' '))
     {
         tokenizer.attempt(State::Next(StateName::ExtensionIndentAfter), State::Nok);
@@ -1594,7 +1797,7 @@ pub(crate) fn start(tokenizer: &mut Tokenizer, index: u8) -> State {
     indent_after(tokenizer)
 }
 
-/// After the indentation of a flow construct, at its marker.
+/// After the indentation of a flow construct or container, at its marker.
 pub(crate) fn indent_after(tokenizer: &mut Tokenizer) -> State {
     let options = tokenizer.parse_state.options;
     let (start, column) = (tokenizer.point.index, tokenizer.point.column);
@@ -1610,8 +1813,8 @@ pub(crate) fn indent_after(tokenizer: &mut Tokenizer) -> State {
     state.furthest = start;
 
     match current {
-        // In flow, spaces and tabs are indentation.
-        Some(b'\t' | b' ') if construct.place() == PlaceKind::Flow => State::Nok,
+        // Outside text, spaces and tabs are indentation.
+        Some(b'\t' | b' ') if construct.place() != PlaceKind::Text => State::Nok,
         Some(byte) if byte != b'\n' && construct.markers().contains(&byte) => {
             let slot = usize::from(state.index);
             if state.slots.len() <= slot {
@@ -1622,6 +1825,38 @@ pub(crate) fn indent_after(tokenizer: &mut Tokenizer) -> State {
         }
         _ => State::Nok,
     }
+}
+
+/// At the start of a later line of a container, check whether it continues.
+pub(crate) fn continuation(tokenizer: &mut Tokenizer) -> State {
+    let options = tokenizer.parse_state.options;
+    let document = &tokenizer.tokenize_state;
+    let container = &document.document_container_stack[document.document_continued];
+    let (index, id) = match container.kind {
+        TokenizerContainer::Extension(index, ..) => (index, container.size),
+        _ => unreachable!("expected container of a construct"),
+    };
+    let (start, events) = (tokenizer.point.index, tokenizer.events.len());
+    let tokenize_state = ext_mut(tokenizer);
+    tokenize_state.index = index;
+    tokenize_state.open.clear();
+    tokenize_state.attempts.clear();
+    tokenize_state.indent = 0;
+    tokenize_state.continuation = true;
+    tokenize_state.start = start;
+    tokenize_state.events = events;
+    tokenize_state.steps = 0;
+    tokenize_state.at = start;
+    tokenize_state.furthest = start;
+    let slot = usize::from(index);
+    if tokenize_state.slots.len() <= slot {
+        tokenize_state.slots.resize_with(slot + 1, || None);
+    }
+    let ExtensionState {
+        slots, containers, ..
+    } = tokenize_state;
+    erased(options, index).resume_container(&mut slots[slot], &*containers[id]);
+    State::Retry(StateName::ExtensionStep)
 }
 
 /// After a flow line ending that continues the construct: consume it.
@@ -1770,7 +2005,27 @@ pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
     }
 
     let attempt = tokenize_state.attempts.last();
+    let is_container = place == PlaceKind::Container;
     let broken = report.broken.or(match step {
+        RawStep::Container if attempt.is_some() => Some("container-in-attempt"),
+        // A container starts with its token and content token open, and
+        // continues with its tokens closed.
+        RawStep::Container => {
+            let is_whole = if tokenize_state.continuation {
+                tokenize_state.open.is_empty()
+            } else {
+                matches!(tokenize_state.open[..], [_, content] if matches!(
+                    tokenizer.parse_state.extension_names.borrow()[usize::from(content)].3,
+                    TokenKind::Content(Content::Document)
+                ))
+            };
+            if is_whole {
+                None
+            } else {
+                Some("container-tokens")
+            }
+        }
+        RawStep::Ok if attempt.is_none() && is_container => Some("ok-in-container"),
         // An attempt ends with the tokens it opened closed.
         RawStep::Ok
             if attempt.map_or(false, |frame| tokenize_state.open.len() != frame.open_len) =>
@@ -1797,6 +2052,37 @@ pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
         return finish(tokenizer, RawStep::Nok, is_flow, false);
     }
 
+    if let RawStep::Container = step {
+        let state = construct.take_container(&mut ext_mut(tokenizer).slots[slot]);
+        let tokenize_state = ext_mut(tokenizer);
+        let tokens = match tokenize_state.open[..] {
+            [token, content] => Some((token, content)),
+            _ => None,
+        };
+        let is_continuation = tokenize_state.continuation;
+        let new_id = tokenize_state.containers.len();
+        let document = &tokenizer.tokenize_state;
+        let id = if is_continuation {
+            document.document_container_stack[document.document_continued].size
+        } else {
+            new_id
+        };
+        let containers = &mut ext_mut(tokenizer).containers;
+        if is_continuation {
+            containers[id] = state;
+        } else {
+            containers.push(state);
+        }
+        let document = &mut tokenizer.tokenize_state;
+        let container = &mut document.document_container_stack[document.document_continued];
+        // A container that starts leaves its token and content open.
+        if let Some((token, content)) = tokens {
+            container.kind = TokenizerContainer::Extension(index, token, content);
+        }
+        container.size = id;
+        return State::Ok;
+    }
+
     finish(tokenizer, step, is_flow, report.line_ending)
 }
 
@@ -1819,6 +2105,8 @@ fn finish(tokenizer: &mut Tokenizer, step: RawStep, is_flow: bool, line_ending: 
         }
         RawStep::Next => State::Next(StateName::ExtensionStep),
         RawStep::Retry => State::Retry(StateName::ExtensionStep),
+        // Handled in `step`.
+        RawStep::Container => unreachable!("expected a container to end in `step`"),
         RawStep::Attempt => {
             let line_start = tokenizer.line_start.clone();
             let tokenize_state = ext_mut(tokenizer);
@@ -1872,19 +2160,23 @@ pub(crate) fn is_in_content(names: &[TokenName], event: &Event) -> bool {
     event.name == Name::Extension && names[usize::from(event.extension)].3 == TokenKind::InContent
 }
 
-/// Index of the exit of the event entered at `index`.
-pub(crate) fn balanced_exit(events: &[Event], mut index: usize) -> usize {
-    let mut depth = 0;
-    loop {
-        match events[index].kind {
-            Kind::Enter => depth += 1,
-            Kind::Exit => depth -= 1,
-        }
-        if depth == 0 {
-            return index;
-        }
-        index += 1;
+/// Index of the exit of each event entered, to jump over tokens in time
+/// independent of what they hold, such as nested containers; empty without
+/// constructs.
+pub(crate) fn exits(events: &[Event], names: &[TokenName]) -> Vec<usize> {
+    if names.is_empty() {
+        return Vec::new();
     }
+
+    let mut exits = vec![0; events.len()];
+    let mut open = vec![];
+    for (index, event) in events.iter().enumerate() {
+        match event.kind {
+            Kind::Enter => open.push(index),
+            Kind::Exit => exits[open.pop().expect("expected an enter")] = index,
+        }
+    }
+    exits
 }
 
 /// A match of a construct, as event indices.
@@ -1904,6 +2196,7 @@ pub(crate) fn collect_tokens<'a>(
     events: &[Event],
     bytes: &'a [u8],
     names: &[TokenName],
+    exits: &[usize],
     start: usize,
 ) -> Match<'a> {
     // Name, enter, exit, and whether content.
@@ -1927,7 +2220,7 @@ pub(crate) fn collect_tokens<'a>(
 
                 if let TokenKind::Content(content) = kind {
                     let enter = index;
-                    index = balanced_exit(events, index);
+                    index = exits[index];
                     contents.push((spans.len() - 1, enter, index, *content == Content::Document));
                     excluded.push((enter, index));
                     // Handle the exit.
@@ -1944,7 +2237,7 @@ pub(crate) fn collect_tokens<'a>(
             // Container prefixes.
             (Kind::Enter, name) if *name != Name::LineEnding => {
                 let enter = index;
-                index = balanced_exit(events, index);
+                index = exits[index];
                 excluded.push((enter, index));
             }
             _ => {}
