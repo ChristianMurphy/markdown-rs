@@ -172,6 +172,19 @@ pub trait Construct {
     /// Take one step at state `state` (the first state is `0`).
     fn step(&self, state: u16, tokenizer: &mut ConstructTokenizer) -> Step;
 
+    /// For a delimiter run in text, like `==` in `==a==`: the sizes of a run
+    /// that can pair, with the same size on both sides.
+    ///
+    /// When not empty, `step` is not used: where `previous` allows, a run of
+    /// an ASCII marker is a sequence, and two sequences of this construct
+    /// pair whole, like GFM strikethrough, with emphasis allowed around them,
+    /// like micromark’s `attentionMarkers`.
+    /// A pair is an `attention` token, with `attentionSequence` tokens around
+    /// an `attentionText` content token.
+    fn attention_sizes(&self) -> &[usize] {
+        &[]
+    }
+
     /// For a container, the state that checks, at the start of each later
     /// line, whether it continues, like micromark’s `continuation`; `None`
     /// ends the container there.
@@ -658,7 +671,7 @@ fn at_boundary(tokenizer: &Tokenizer, place: Place) -> bool {
 }
 
 /// Number of a token name in this parse, if it fits in an event.
-fn intern(
+pub(crate) fn intern(
     tokenizer: &Tokenizer,
     construct: u8,
     name: &'static str,

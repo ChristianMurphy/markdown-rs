@@ -125,6 +125,20 @@ pub fn before_construct(tokenizer: &mut Tokenizer, index: u8) -> State {
                     State::Next(StateName::TextBefore),
                     State::Next(StateName::TextBeforeConstructNext),
                 );
+
+                // A delimiter run, of ASCII, which the attention resolver pairs
+                // with runs of the same construct.
+                if !constructs[index].attention_sizes().is_empty() {
+                    if !byte.is_ascii() {
+                        return State::Nok;
+                    }
+                    tokenizer.tokenize_state.marker = byte;
+                    tokenizer.enter(Name::AttentionSequence);
+                    let event = tokenizer.events.last_mut().expect("expected event");
+                    event.extension = u16::from(next);
+                    return State::Retry(StateName::AttentionInside);
+                }
+
                 return start_construct(tokenizer, next - 1);
             }
             index += 1;
