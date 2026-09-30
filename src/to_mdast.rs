@@ -1,7 +1,7 @@
 //! Turn events into a syntax tree.
 
 use crate::event::{Event, Kind, Name};
-use crate::extension::{balanced_exit, collect_tokens, construct, is_in_content, Token, TokenName};
+use crate::extension::{collect_tokens, construct, exits, is_in_content, Token, TokenName};
 use crate::mdast::{
     AttributeContent, AttributeValue, AttributeValueExpression, Blockquote, Break, Code,
     Definition, Delete, Emphasis, FootnoteDefinition, FootnoteReference, Heading, Html, Image,
@@ -113,6 +113,8 @@ struct CompileContext<'a> {
     extension_matches: Vec<ExtensionMatch<'a>>,
     /// Last event of a token of a construct in content, which is skipped.
     extension_skip: Option<usize>,
+    /// Exit of each event entered, with constructs.
+    extension_exits: Vec<usize>,
     /// Current event index.
     index: usize,
 }
@@ -157,6 +159,7 @@ impl<'a> CompileContext<'a> {
             extension_names,
             extension_matches: vec![],
             extension_skip: None,
+            extension_exits: exits(events, extension_names),
             index: 0,
         }
     }
@@ -293,7 +296,7 @@ fn enter(context: &mut CompileContext) -> Result<(), message::Message> {
         if top.inside {
             // A token of a construct in its content, such as a line prefix.
             if is_in_content(context.extension_names, &context.events[index]) {
-                context.extension_skip = Some(balanced_exit(context.events, index));
+                context.extension_skip = Some(context.extension_exits[index]);
                 return Ok(());
             }
         } else {
@@ -853,7 +856,12 @@ fn on_enter_link(context: &mut CompileContext) {
 /// Handle [`Enter`][Kind::Enter]:{[`ListOrdered`][Name::ListOrdered],[`ListUnordered`][Name::ListUnordered]}.
 fn on_enter_list(context: &mut CompileContext) {
     let ordered = context.events[context.index].name == Name::ListOrdered;
-    let spread = list_loose(context.events, context.index, false);
+    let spread = list_loose(
+        context.events,
+        context.index,
+        false,
+        context.extension_names,
+    );
 
     context.tail_push(Node::List(List {
         ordered,
@@ -1874,6 +1882,7 @@ fn on_enter_extension(context: &mut CompileContext) {
         context.events,
         context.bytes,
         context.extension_names,
+        &context.extension_exits,
         context.index,
     );
     context.extension_matches.push(ExtensionMatch {
