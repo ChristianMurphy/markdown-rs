@@ -149,7 +149,7 @@ The pieces follow.
   - A content token is a property of its type, so `enter` and `enter_content` become one `enter(token)`.
   - `to_mdast` gets `Vec<Token<'_, Self::Token>>`, so it matches on the enum, not on positions or strings.
   - Names are interned once, from `ALL`, when a parse starts. Too many names becomes an error up front (`too-many-construct-tokens`), next to `too-many-constructs`. That removes the untested gap of a parse passing 65,536 names.
-- The derive: a new `markdown_derive` crate, re-exported behind a `derive` feature of `markdown`. `#[derive(TokenType)]` writes `ALL`, `name` (from `#[token(name = "…")]`, or the variant name in camel case) and `content` (from `#[token(content = text)]`). Without the feature, authors write the impl by hand, in about ten lines. It uses `syn` 2 and `quote`, which build on 1.65.
+- The derive: a new `markdown_derive` crate, re-exported behind a `derive` feature of `markdown`. `#[derive(TokenType)]` writes `ALL`, `name` (from `#[token(name = "…")]`, or the variant name in camel case) and `content` (from `#[token(content = text)]`). Without the feature, authors write the impl by hand, in about ten lines. It uses `syn` 2 and `quote`, which build on 1.62 (D62, D63).
 - Alternatives:
   - Keep `&'static str` and check names at `exit`, as 0906fe3 does.
   - A `macro_rules!` macro in the main crate: no extra crate, but harder to read in rustdoc.
@@ -378,6 +378,19 @@ The pieces follow.
 - With constructs: within about 5% of 0906fe3, on the mention, wiki link and fenced container from the tests, on short documents and on `readme.md`.
 - `Reach::Pair` on `[[a ` × n: linear steps, measured by `assert_linear`.
 
+### D63. The derive comes after the delimiter runs
+
+- Question: where in the series does the derive go? The plan put it right after text constructs, but `TokenType::content` arrives with text content, and `ContentType::Document` with document content.
+- Chosen: one commit after the delimiter runs, before the `Processor` methods, written once against the final `TokenType`. `markdown` depends on `markdown_derive` at an exact version, so the trait and the derive release together. The earlier commits keep hand-written impls, which stay the way without the `derive` feature.
+- Also chosen: a token missing from a hand-written `ALL` breaks the rule `token-not-in-all`, in the text constructs commit, instead of an `expect` that panicked in every build.
+- The developer weighed it for the long term: once PR 270 lands, the place of a commit in the series matters little; what lasts is a trait settled before the first release, and a derive that ships in lockstep with it.
+- Alternatives:
+  - Right after text constructs, as planned, with `content = text` added in the content commit and `content = document` in the document commit: three commits change the derive, and no one releases the states between them.
+  - A separate PR after PR 270: a smaller PR 270, but safe only if the trait is frozen there, since a change for the derive later would break released impls.
+  - A `macro_rules!` macro in `markdown`: no second crate to version and no `syn`, and it also lists variants once, but it reads less like Rust, and attributes per variant are clumsier.
+- `syn` 2.0.106, `quote` 1.0.41, and `proc-macro2` 1.0.103 build on 1.62, and a crate that derives `TokenType` builds and runs there, so `markdown_derive` declares 1.62, like `markdown`. The 1.62 check copies `markdown_derive` too.
+- `#[token(crate = "...")]` on the enum gives the path to `markdown` for a renamed dependency, as serde's `crate` attribute does.
+
 ## Order of work, as a revision of PR 270
 
 PR 270 is revised in place, so the first release has the final API. The series is built on `ccr-30c42fe4-xadkx0`, on top of `feat/syntax-extensions`, and reaches PR 270 only after the developer approves it. The commit series keeps its shape: each commit adds one feature, with the typed API from the start, and passes the checks on its own.
@@ -385,7 +398,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 1. Stack on PR 230, which fixes CI on current stable, PR 258, which declares 1.62, and the fix for `previous` across container prefixes (D53), like PRs 259 to 262. There is no version raise (D62).
 2. hast, the custom mdast node with `h_name` (D56), mdast_util_to_hast, and markdown_processor, as in PRs 259 to 262.
 3. Text constructs: `Construct`, `Place`, typed states and tokens, `Ctx`, `Reach`, `previous` as a `char`, the outer rollback (D47 to D54).
-4. The optional `markdown_derive` crate.
+4. The optional `markdown_derive` crate, placed after the delimiter runs (D63).
 5. Text content, attempts, flow constructs (with D57), document content, containers (with `open_container`), and delimiter runs as `Reach::Attention`, as PR 270's commits are now.
 6. `Reach::Pair` and `assert_linear`.
 7. HTML handlers (D55).
@@ -398,7 +411,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 - One step of "Order of work" per commit. The commit body cites the D-numbers it carries out.
 - Tests first: for each step, the cases from "Tests" are written before the code, including `compile_fail` doctests and step counts.
 - A deviation stops the work. If the code forces a change to a decision, such as a borrow that cannot work or a cost over budget, the developer decides, and the answer is recorded here as a new D-number before the work goes on.
-- Checks on every commit: `cargo fmt --check`; all tests; clippy diagnostics as on `main`; `cargo check` on 1.65; the `no_std` build for `thumbv7em-none-eabihf`; output equal to PR 262 without constructs on the test suite and the generated documents. Callgrind (1% without constructs, 5% with) and the fuzz targets run on the commits that change parsing.
+- Checks on every commit: `cargo fmt --check`; all tests; clippy diagnostics as on `main`; `cargo check` on 1.62, with default and all features; the `no_std` build for `thumbv7em-none-eabihf`; output equal to PR 262 without constructs on the test suite and the generated documents. Callgrind (1% without constructs, 5% with) and the fuzz targets run on the commits that change parsing.
 - A review of each commit against this plan before the developer sees it.
 - Commit messages name issues and PRs without `#`, such as `Refs: issue 32` or `PR 270`, so GitHub does not autolink them and add them to a timeline on every push.
 - Commits going upstream are authored by the developer, in the Problem, Goal, Changes, Notes and `Refs` style of PR 270, with no co-author, sign-off, or session trailers, and no tool or model names. PR 270's description keeps its one disclosure line, as the developer wrote it.
@@ -406,9 +419,9 @@ PR 270 is revised in place, so the first release has the final API. The series i
 ### Environment
 
 - CI resolves a fresh lockfile on the latest stable. On 1.0.0 that breaks the dev-dependencies (`swc_common` 8.1.1 imports `serde::__private`, which `serde` 1.0.220 removed) and clippy (`manual_assert_eq` in 1.98 and `redundant_else` in 1.99 are errors under `deny(clippy::pedantic)`). PR 230 fixes both, with `swc_core` 32, and PR 270's copy of it also clears the warnings clippy 1.99 reports. Each commit runs the CI job as `main.yml` does: `cargo fmt --check`, then `cargo clippy --all-features --all-targets --workspace` with no diagnostics, then `cargo test --all-features --workspace`, on a fresh lockfile.
-- `cargo +1.65` cannot resolve the workspace: newer dev-dependencies need a newer cargo. The 1.65 check copies the `markdown` library without dev-dependencies, resolves it with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`, pins `unicode-id` 0.3.6 (and `serde` 1.0.180 for `--all-features`), and writes the lockfile as version 3. The four new crates are checked the same way, as a workspace of their own.
+- `cargo +1.62` cannot resolve the workspace: newer dev-dependencies need a newer cargo. The 1.62 check copies the `markdown` library, and `markdown_derive` for its `derive` feature, without dev-dependencies, resolves it with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`, pins `unicode-id` 0.3.6 (and `serde` 1.0.180 for `--all-features`), and writes the lockfile as version 3. The four new crates are checked the same way, as a workspace of their own.
 - `#![deny(clippy::pedantic)]` stops clippy at the library's errors, so test code is linted only once the library has none. With no diagnostics at all, that holds on every commit.
-- The four new crates declare no `rust-version`. They build on 1.65.
+- The four crates of the tree path declare no `rust-version`; they built on 1.65 when checked. `markdown_derive` declares 1.62, since the `derive` feature of `markdown` uses it (D63).
 
 ### Progress
 
@@ -417,7 +430,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 1. Base: PRs 230 and 258, the prefix fix | D53, D62 | the CI fix, the 1.62 minimum, the prefix fix | CI job clean on each commit; the prefix fix's tests fail on 1.0.0 and pass with it | Done |
 | 2. hast, mdast, processor crates | D56 | the hast, custom node, mdast_util_to_hast and processor commits | `cite` and `longDesc` checks; `h_name` with `Debug` and serde; elements, properties and value with `h_name`; a handler before `h_name`; through `Processor`, with a `javascript:` `href` emptied | Done |
 | 3. Text constructs | D47 to D54 | the text constructs commit | 28 tests in both modes (with and without `test-util`), `compile_fail` examples, the differential test; CI job clean; builds on 1.62; callgrind −0.12% to +0.64% without constructs | Done |
-| 4. `markdown_derive` | D48 | | | To do |
+| 4. `markdown_derive` | D48, D63 | the derive commit, after the delimiter runs; the `token-not-in-all` rule in the text constructs commit | the derived impl, a parse with derived content tokens, a renamed crate, an enum without variants, a `compile_fail` example for each of six errors, each checked to fail with its own message; the rule in both modes, failing without the fix; builds and runs on 1.62 | Done |
 | 5. Content, attempts, flow, containers, runs | D51 | text content, attempts, flow constructs, document content, containers, delimiter runs | 110 extension tests in both modes at the tip; CI job clean at each commit; builds on 1.62; output equal to each parent on 600,000 random documents; callgrind within +0.27% of each parent; `\|` containers like `>` on 12,000,000 fuzzed documents; runs at `~` like strikethrough on 2,400,000 | Done |
 | 6. `Reach::Pair`, `assert_linear` | D50, D51 | | | To do |
 | 7. HTML handlers | D55, D57 | | | To do |
