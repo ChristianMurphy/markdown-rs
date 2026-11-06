@@ -403,6 +403,8 @@ PR 270 is revised in place, so the first release has the final API. The series i
 
 ## Settled questions
 
+- The other stacked PRs: PR 230's branch carries the same CI fix as PR 270's copy. PRs 258 to 262 stay as they are, and PR 270 is rebased once they land.
+
 - `hChildren`: left out (D56).
 - MSRV: raised to 1.65, asked for in PR 270. If wooorm declines, D47 to D49 still work on 1.56, with explicit lifetimes on `Ctx`, no let-else, and `syn` 1 or a hand-written parser in the derive.
 - Rule assertions: only with `test-util` (D49).
