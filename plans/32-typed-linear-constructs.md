@@ -406,9 +406,9 @@ PR 270 is revised in place, so the first release has the final API. The series i
 |---|---|---|---|---|
 | 1. Base: PRs 230 and 258, the prefix fix | D53, D62 | the CI fix, the 1.62 minimum, the prefix fix | CI job clean on each commit; the prefix fix's tests fail on 1.0.0 and pass with it | Done |
 | 2. hast, mdast, processor crates | D56 | the hast, custom node, mdast_util_to_hast and processor commits | `cite` and `longDesc` checks; `h_name` with `Debug` and serde; elements, properties and value with `h_name`; a handler before `h_name`; through `Processor`, with a `javascript:` `href` emptied | Done |
-| 3. Text constructs | D47 to D54 | | | To do |
+| 3. Text constructs | D47 to D54 | the text constructs commit | 28 tests in both modes (with and without `test-util`), `compile_fail` examples, the differential test; CI job clean; builds on 1.62; callgrind −0.12% to +0.64% without constructs | Done |
 | 4. `markdown_derive` | D48 | | | To do |
-| 5. Content, attempts, flow, containers, runs | D51, D57 | | | To do |
+| 5. Content, attempts, flow, containers, runs | D51, D57 | text content and attempts ported; flow, document content, containers and runs to do | 58 extension tests in both modes after attempts; CI job clean on each ported commit | In progress |
 | 6. `Reach::Pair`, `assert_linear` | D50, D51 | | | To do |
 | 7. HTML handlers | D55 | | | To do |
 | 8. `Processor` methods | | | | To do |
