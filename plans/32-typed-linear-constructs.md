@@ -342,6 +342,16 @@ The pieces follow.
 - `Reach::Bytes(n)`: a step at a byte past `n` fails; a step at the end does not, as there is nothing to read.
 - `previous` is the character before: ASCII from the tokenizer's `previous`, which covers line endings and the virtual spaces of tabs, and other characters decoded from the bytes.
 
+### As built: the later commits
+
+- `TokenType::content` replaces `enter_content`: a token is content wherever it is entered.
+- Flow: `Flow` place. `Consumed::ok` is not there for flow, so a flow construct cannot end after a consumed byte. Rules: `ok-before-line-end`, `exit-after-line-ending`, `line-ending-in-attempt`. A match that ends at a limit after its first line goes through the same path as any failure there, so it is `flow-construct-late-failure`; the first port returned early and missed that, and a test now covers it.
+- Containers: `Container` place. A container ends its first line, and each later line it continues on, with `container(state)`, which only a `Container` has; `state` checks the next line and is kept with the container, replacing `continuation()` and word 0 of `memory`. Rules: `line-ending-in-container`, `consume-in-container-content`, `container-tokens`, `ok-in-container`, `container-in-attempt`.
+- Content kinds by place are rules checked when a token is entered: `document-content-in-text` and `text-content-in-container`. A check of each token type before parsing rejected plugins that share one token enum across places, so the developer chose the rules.
+- Delimiter runs: `Reach::Attention(sizes)` and the token type `RunToken`. Parsing returns `attention-construct` before it starts for a run whose `Token` is not `RunToken`, or outside text.
+- Attempts: `attempt(state, ok, nok)` with typed states; `nok` goes on with the data given when the attempt started.
+- Limits (the step budget, the reach, the depth of content and of attempts) end a match without a panic; only broken rules panic with `test-util`.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -408,10 +418,10 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 2. hast, mdast, processor crates | D56 | the hast, custom node, mdast_util_to_hast and processor commits | `cite` and `longDesc` checks; `h_name` with `Debug` and serde; elements, properties and value with `h_name`; a handler before `h_name`; through `Processor`, with a `javascript:` `href` emptied | Done |
 | 3. Text constructs | D47 to D54 | the text constructs commit | 28 tests in both modes (with and without `test-util`), `compile_fail` examples, the differential test; CI job clean; builds on 1.62; callgrind −0.12% to +0.64% without constructs | Done |
 | 4. `markdown_derive` | D48 | | | To do |
-| 5. Content, attempts, flow, containers, runs | D51, D57 | text content and attempts ported; flow, document content, containers and runs to do | 58 extension tests in both modes after attempts; CI job clean on each ported commit | In progress |
+| 5. Content, attempts, flow, containers, runs | D51, D57 | text content, attempts, flow constructs, document content, containers, delimiter runs | 109 extension tests in both modes at the tip; CI job clean at each ported commit; builds on 1.62 | Done; numbers in the commit messages wait for the re-measure |
 | 6. `Reach::Pair`, `assert_linear` | D50, D51 | | | To do |
 | 7. HTML handlers | D55 | | | To do |
-| 8. `Processor` methods | | | | To do |
+| 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
 | 9. Plugin ports, description | | | | To do |
 | 10. Public API check, message to adopters | D59, D60 | | | To do |
 
