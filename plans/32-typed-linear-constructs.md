@@ -22,7 +22,7 @@ This plan revises the `Construct` API toward both goals and folds in the review 
 | Author friction | Some, with safe defaults | A simple construct stays about as short as today |
 | Cost with constructs | Up to about 5% over 0906fe3 | Allows a downcast per step and per-construct slots; with no constructs, the 1% gate stays |
 | `no_std`, `forbid(unsafe_code)` | Fixed | Type erasure goes through `Box<dyn Any>` |
-| MSRV | Raise to 1.65, and ask in PR 270 | Generic associated types, let-else, and `syn` 2 for the derive; reworked if wooorm declines |
+| MSRV | Stay at 1.62, as PR 258 declares | The typed API builds on 1.62 and needs no generic associated types; a raise to 1.65 was made and then dropped (D62) |
 | Proc macros | Allowed, opt-in | An optional `markdown_derive` crate, behind a `derive` feature, with `#[derive(TokenType)]` only |
 | One `Construct` trait | Keep one trait, with the place in the type | Place-specific methods exist only where valid |
 | Rule broken at run time | `Nok`; an assertion naming the rule only with `test-util` | Apps' debug builds and fuzzers never panic on hostile input; authors' tests fail with a reason |
@@ -216,8 +216,9 @@ The pieces follow.
 ### D53. Rolling back a failed match
 
 - Murderlon's case: `"> =\n>www.b.c\n"` with GFM and a text construct at `=` that consumes `=` and the line ending, then fails. `www.b.c` becomes a link. Without the construct, it is text.
-- Cause, to confirm with a failing test first: `AttemptFrame` restores `line_start` and the chunk state for an attempt inside a construct (D36). But the whole match failing is undone by the tokenizer's own `attempt`, which does not restore them.
-- Chosen: the outer match saves and restores the same things as an `AttemptFrame`, kept in the slot from D47.
+- Cause, found by tracing `previous` at the autolink check: not the rollback. When the tokenizer skips the container prefix of a later line, `move_to` moves over its bytes one at a time, and each becomes `previous`, so `www` sees `>`. A replay after a failed attempt reaches the next chunk without moving over the prefix, so it sees the line ending. 1.0.0 is inconsistent on its own: `> a\n>www.b.c` gives no link while `> a\n> www.b.c` and `>www.b.c` do, and micromark and cmark-gfm see a line ending there.
+- Chosen: `move_to` keeps `previous`, a fix of 1.0.0 as its own upstream PR, stacked under PR 270 like PRs 230 and 258.
+- Test: a differential test in the text constructs commit. A construct that consumes a random number of bytes, line endings included, then fails, against no construct, over random documents of lines with container prefixes, with three option sets. It found 10 differences in 180,000 runs before the fix, and none in 720,000 after.
 
 ### D54. Errors for authors
 
@@ -328,6 +329,19 @@ The pieces follow.
   - `Pair`, documenting that `:a[ :b[x]` loses `:b[x]`.
   - `Unbounded`: correct output, but quadratic on `:a[` repeated.
 
+### D62. The minimum Rust version stays 1.62
+
+- The plan raised it to 1.65 for generic associated types and `let`-`else`, on the expectation that the typed API needed them. Built, it does not: the text constructs commit builds on 1.62, and nothing uses generic associated types. `let`-`else` came only from clippy, which suggests it once the minimum is 1.65.
+- Chosen: no raise. PR 258's 1.62 stays, and the `let`-`else` rewrites go back to `match`. If a later step needs a newer compiler, it raises the minimum with that reason.
+
+### As built: text constructs
+
+- `markers`, `start` and `reach` are methods, not associated consts, so a construct can be configured at run time, as the tests' constructs are.
+- `Consumed` can `enter` as well as `exit`: micromark constructs often consume a marker and enter the next token in one step. After a line ending, that is the rule `enter-after-line-ending`.
+- Rule names, which `test-util` panics with: `consume-outside-token`, `token-after-match`, `empty-token`, `exit-without-token`, `enter-after-line-ending`, `ok-after-line-ending`, `ok-without-bytes`, `ok-with-open-tokens`, `token-inside-character`. Retrying 256 times in a row and reading past the reach are limits, not rules: they do not match, and do not panic.
+- `Reach::Bytes(n)`: a step at a byte past `n` fails; a step at the end does not, as there is nothing to read.
+- `previous` is the character before: ASCII from the tokenizer's `previous`, which covers line endings and the virtual spaces of tabs, and other characters decoded from the bytes.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -358,7 +372,7 @@ The pieces follow.
 
 PR 270 is revised in place, so the first release has the final API. The series is built on `ccr-30c42fe4-xadkx0`, on top of `feat/syntax-extensions`, and reaches PR 270 only after the developer approves it. The commit series keeps its shape: each commit adds one feature, with the typed API from the start, and passes the checks on its own.
 
-1. Raise the MSRV to 1.65, with the reason in the commit message and in PR 270's description. It sits on PR 230, which fixes CI on current stable, and PR 258, which declares 1.62, both stacked like PRs 259 to 262.
+1. Stack on PR 230, which fixes CI on current stable, PR 258, which declares 1.62, and the fix for `previous` across container prefixes (D53), like PRs 259 to 262. There is no version raise (D62).
 2. hast, the custom mdast node with `h_name` (D56), mdast_util_to_hast, and markdown_processor, as in PRs 259 to 262.
 3. Text constructs: `Construct`, `Place`, typed states and tokens, `Ctx`, `Reach`, `previous` as a `char`, the outer rollback (D47 to D54).
 4. The optional `markdown_derive` crate.
@@ -390,7 +404,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 
 | Step | Decisions | Commit | Tests | Status |
 |---|---|---|---|---|
-| 1. MSRV 1.65 | | the version-raise commit, on PRs 230 and 258 | CI job clean on each commit (no clippy diagnostics, all tests pass, fresh lockfile, stable 1.99.1); `cargo +1.65 check`; `no_std` with PR 221 | Done |
+| 1. Base: PRs 230 and 258, the prefix fix | D53, D62 | the CI fix, the 1.62 minimum, the prefix fix | CI job clean on each commit; the prefix fix's tests fail on 1.0.0 and pass with it | Done |
 | 2. hast, mdast, processor crates | D56 | the hast, custom node, mdast_util_to_hast and processor commits | `cite` and `longDesc` checks; `h_name` with `Debug` and serde; elements, properties and value with `h_name`; a handler before `h_name`; through `Processor`, with a `javascript:` `href` emptied | Done |
 | 3. Text constructs | D47 to D54 | | | To do |
 | 4. `markdown_derive` | D48 | | | To do |
@@ -406,7 +420,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 - The other stacked PRs: PR 230's branch carries the same CI fix as PR 270's copy. PRs 258 to 262 stay as they are, and PR 270 is rebased once they land.
 
 - `hChildren`: left out (D56).
-- MSRV: raised to 1.65, asked for in PR 270. If wooorm declines, D47 to D49 still work on 1.56, with explicit lifetimes on `Ctx`, no let-else, and `syn` 1 or a hand-written parser in the derive.
+- MSRV: stays 1.62 (D62).
 - Rule assertions: only with `test-util` (D49).
 - `mdast::Custom`: `h_name` added plainly, without `#[non_exhaustive]`.
 - Names: `markdown::extension::assert_linear` behind a `test-util` feature, and `markdown_derive` behind a `derive` feature.
