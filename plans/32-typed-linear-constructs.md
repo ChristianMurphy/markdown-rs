@@ -418,9 +418,9 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 2. hast, mdast, processor crates | D56 | the hast, custom node, mdast_util_to_hast and processor commits | `cite` and `longDesc` checks; `h_name` with `Debug` and serde; elements, properties and value with `h_name`; a handler before `h_name`; through `Processor`, with a `javascript:` `href` emptied | Done |
 | 3. Text constructs | D47 to D54 | the text constructs commit | 28 tests in both modes (with and without `test-util`), `compile_fail` examples, the differential test; CI job clean; builds on 1.62; callgrind −0.12% to +0.64% without constructs | Done |
 | 4. `markdown_derive` | D48 | | | To do |
-| 5. Content, attempts, flow, containers, runs | D51, D57 | text content, attempts, flow constructs, document content, containers, delimiter runs | 110 extension tests in both modes at the tip; CI job clean at each commit; builds on 1.62; output equal to each parent on 600,000 random documents; callgrind within +0.27% of each parent; `\|` containers like `>` on 12,000,000 fuzzed documents; runs at `~` like strikethrough on 2,400,000 | Done |
+| 5. Content, attempts, flow, containers, runs | D51 | text content, attempts, flow constructs, document content, containers, delimiter runs | 110 extension tests in both modes at the tip; CI job clean at each commit; builds on 1.62; output equal to each parent on 600,000 random documents; callgrind within +0.27% of each parent; `\|` containers like `>` on 12,000,000 fuzzed documents; runs at `~` like strikethrough on 2,400,000 | Done |
 | 6. `Reach::Pair`, `assert_linear` | D50, D51 | | | To do |
-| 7. HTML handlers | D55 | | | To do |
+| 7. HTML handlers | D55, D57 | | | To do |
 | 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
 | 9. Plugin ports, description | | | | To do |
 | 10. Public API check, message to adopters | D59, D60 | | | To do |
