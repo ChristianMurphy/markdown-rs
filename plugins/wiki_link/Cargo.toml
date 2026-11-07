@@ -1,0 +1,17 @@
+[dependencies]
+markdown = { features = ["derive"], path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+markdown_processor = { features = ["test-util"], path = "../../markdown_processor" }
+markdown = { features = ["derive", "test-util"], path = "../../" }
+pretty_assertions = { workspace = true }
+
+[package]
+description = "Port: wiki links (`[[Page|alias]]`)"
+edition = "2018"
+license = "MIT"
+name = "wiki_link"
+publish = false
+rust-version = "1.62"
+version = "0.0.0"
