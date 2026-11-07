@@ -1,6 +1,9 @@
 //! Turn events into a string of HTML.
 use crate::event::{Event, Kind, Name};
-use crate::extension::{collect_tokens, exits, is_in_content, own_text, TokenName};
+use crate::extension::{
+    collect_tokens, exits, html as construct_html, is_block, is_in_content, own_text, HtmlSink,
+    HtmlWriter, RawHtmlEvent, RawToken, TokenName, Url,
+};
 use crate::mdast::AlignKind;
 use crate::util::{
     character_reference::decode as decode_character_reference,
@@ -13,7 +16,7 @@ use crate::util::{
     skip,
     slice::{Position, Slice},
 };
-use crate::{CompileOptions, LineEnding};
+use crate::{CompileOptions, LineEnding, ParseOptions};
 use alloc::{
     format,
     string::{String, ToString},
@@ -130,33 +133,60 @@ struct CompileContext<'a> {
     buffers: Vec<String>,
     /// Current event index.
     index: usize,
+    /// Options of the parse, with the constructs.
+    parse: &'a ParseOptions,
     /// Names of the tokens of constructs, by interned index.
     extension_names: &'a [TokenName],
     /// Matches of constructs being written, innermost last.
-    extension_matches: Vec<HtmlMatch>,
+    extension_matches: Vec<HtmlMatch<'a>>,
     /// Last event of a token of a construct in content, which is skipped.
     extension_skip: Option<usize>,
     /// Exit of each event entered, with constructs.
     extension_exits: Vec<usize>,
 }
 
-/// A match of a construct being written: its own text as source text, its
-/// content as HTML.
+/// A match of a construct being written, by its handler, as steps in the
+/// order of the source; its content is written as HTML between them.
 #[derive(Debug)]
-struct HtmlMatch {
-    /// Index of the last event of the match.
-    end: usize,
-    /// Enter and exit indices of content tokens, and whether the content is
-    /// a document, in order.
-    contents: Vec<(usize, usize, bool)>,
-    /// Index in `contents` of the next content token.
-    content: usize,
+struct HtmlMatch<'a> {
+    /// Index of the construct.
+    construct: u8,
+    /// Tokens of the match.
+    tokens: Vec<RawToken<'a>>,
+    /// What to give the handler.
+    steps: Vec<HtmlStep>,
+    /// Index in `steps` of the next step.
+    at: usize,
     /// Events left out of the construct’s text.
     excluded: Vec<(usize, usize)>,
-    /// Event from which the construct’s text is not yet written.
-    cursor: usize,
-    /// Whether the current event is inside content.
-    inside: bool,
+    /// Index of the last event of the match.
+    end: usize,
+    /// Enter and exit of the content token the steps stopped at, and
+    /// whether its content is a document.
+    content: Option<(usize, usize, bool)>,
+}
+
+impl HtmlMatch<'_> {
+    /// Whether the event at `index` is inside the content the steps stopped
+    /// at: other events of the match are the handler’s.
+    fn is_inside(&self, index: usize) -> bool {
+        self.content
+            .map_or(false, |(enter, exit, _)| index > enter && index < exit)
+    }
+}
+
+/// A step of writing a match.
+#[derive(Clone, Copy, Debug)]
+enum HtmlStep {
+    /// Token at this index in `tokens` starts.
+    Enter(usize),
+    /// Token at this index ends.
+    Exit(usize),
+    /// Text of the token at this index, between two events.
+    Text(usize, usize, usize),
+    /// Content, from the enter to the exit at these events, and whether it
+    /// is a document.
+    Content(usize, usize, bool),
 }
 
 impl<'a> CompileContext<'a> {
@@ -166,6 +196,7 @@ impl<'a> CompileContext<'a> {
         bytes: &'a [u8],
         options: &'a CompileOptions,
         line_ending: LineEnding,
+        parse: &'a ParseOptions,
         extension_names: &'a [TokenName],
     ) -> CompileContext<'a> {
         CompileContext {
@@ -193,6 +224,7 @@ impl<'a> CompileContext<'a> {
             line_ending_default: line_ending,
             buffers: vec![String::new()],
             index: 0,
+            parse,
             extension_names,
             extension_matches: vec![],
             extension_skip: None,
@@ -241,6 +273,7 @@ pub(crate) fn compile(
     events: &[Event],
     bytes: &[u8],
     options: &CompileOptions,
+    parse: &ParseOptions,
     extension_names: &[TokenName],
 ) -> String {
     let mut index = 0;
@@ -266,8 +299,14 @@ pub(crate) fn compile(
     let line_ending_default =
         line_ending_inferred.unwrap_or_else(|| options.default_line_ending.clone());
 
-    let mut context =
-        CompileContext::new(events, bytes, options, line_ending_default, extension_names);
+    let mut context = CompileContext::new(
+        events,
+        bytes,
+        options,
+        line_ending_default,
+        parse,
+        extension_names,
+    );
     let mut definition_indices = vec![];
     let mut index = 0;
     let mut definition_inside = false;
@@ -349,67 +388,183 @@ fn handle(context: &mut CompileContext, index: usize) {
     }
 }
 
-/// Handle [`Enter`][Kind::Enter].
-fn enter(context: &mut CompileContext) {
-    // Constructs: their own text as text, without container prefixes, and
-    // their content as HTML.
+/// Handle the enter of the first token of a match of a construct.
+fn on_enter_construct(context: &mut CompileContext) {
     let index = context.index;
-    if context.extension_skip.map_or(false, |until| index <= until) {
-        return;
+    let found = collect_tokens(
+        context.events,
+        context.bytes,
+        context.extension_names,
+        &context.extension_exits,
+        index,
+    );
+    let construct = context.extension_names[usize::from(context.events[index].extension)].0;
+
+    // Boundaries of tokens, in order: event, whether an exit, and token.
+    let mut bounds = vec![];
+    for (token, (enter, exit)) in found.spans.iter().enumerate() {
+        bounds.push((*enter, false, token));
+        bounds.push((*exit, true, token));
     }
-    if let Some(top) = context.extension_matches.last_mut() {
-        if top.inside {
-            // A token of a construct in its content, such as a line prefix.
-            if is_in_content(context.extension_names, &context.events[index]) {
-                context.extension_skip = Some(context.extension_exits[index]);
-                return;
-            }
+    bounds.sort_unstable();
+
+    let mut steps = vec![];
+    let mut open = vec![];
+    for (bound, &(event, is_exit, token)) in bounds.iter().enumerate() {
+        if is_exit {
+            steps.push(HtmlStep::Exit(token));
+            open.pop();
         } else {
-            if let Some((_, _, is_document)) = top
-                .contents
-                .get(top.content)
-                .filter(|(enter, _, _)| *enter == index)
+            steps.push(HtmlStep::Enter(token));
+            open.push(token);
+            if let Some((_, enter, exit, is_document)) =
+                found.contents.iter().find(|content| content.0 == token)
             {
-                let is_document = *is_document;
-                top.inside = true;
-                let text = own_text(
-                    context.events,
-                    context.bytes,
-                    top.cursor,
-                    index,
-                    &top.excluded,
-                );
-                let value = encode(&text, context.encode_html);
-                context.push(&value);
+                steps.push(HtmlStep::Content(*enter, *exit, *is_document));
+                continue;
+            }
+        }
+        if let (Some(owner), Some(next)) = (open.last(), bounds.get(bound + 1)) {
+            steps.push(HtmlStep::Text(*owner, event, next.0));
+        }
+    }
+
+    // A flow construct or container is a block.
+    if is_block(context.parse, construct) {
+        context.line_ending_if_needed();
+    }
+
+    context.extension_matches.push(HtmlMatch {
+        construct,
+        tokens: found.tokens,
+        steps,
+        at: 0,
+        excluded: found.excluded,
+        end: found.end,
+        content: None,
+    });
+    run_construct(context);
+}
+
+/// Give the handler of the innermost match its steps, up to its next
+/// content or its end.
+fn run_construct(context: &mut CompileContext) {
+    let mut top = context.extension_matches.pop().expect("expected a match");
+    let parse = context.parse;
+
+    while let Some(step) = top.steps.get(top.at).copied() {
+        top.at += 1;
+        match step {
+            HtmlStep::Enter(token) => construct_html(
+                parse,
+                top.construct,
+                RawHtmlEvent::Enter(token),
+                &top.tokens,
+                &mut HtmlWriter::new(context),
+            ),
+            HtmlStep::Exit(token) => construct_html(
+                parse,
+                top.construct,
+                RawHtmlEvent::Exit(token),
+                &top.tokens,
+                &mut HtmlWriter::new(context),
+            ),
+            HtmlStep::Text(token, from, to) => {
+                let text = own_text(context.events, context.bytes, from, to, &top.excluded);
+                if !text.is_empty() {
+                    construct_html(
+                        parse,
+                        top.construct,
+                        RawHtmlEvent::Text(token, &text),
+                        &top.tokens,
+                        &mut HtmlWriter::new(context),
+                    );
+                }
+            }
+            HtmlStep::Content(enter, exit, is_document) => {
+                top.content = Some((enter, exit, is_document));
                 // A document is not tight, like the content of a block quote.
                 if is_document {
                     context.tight_stack.push(false);
                 }
+                break;
             }
+        }
+    }
+
+    context.extension_matches.push(top);
+}
+
+impl HtmlSink for CompileContext<'_> {
+    fn text(&mut self, value: &str) {
+        let value = encode(value, self.encode_html);
+        self.push(&value);
+    }
+
+    fn tag(&mut self, value: &str) {
+        if !self.image_alt_inside {
+            self.push(value);
+        }
+    }
+
+    fn url(&mut self, value: &str, kind: Url) {
+        let allow = self.options.allow_dangerous_protocol
+            || (kind == Url::Src && self.options.allow_any_img_src);
+        let url = if allow {
+            sanitize(value)
+        } else {
+            sanitize_with_protocols(
+                value,
+                match kind {
+                    Url::Href => &SAFE_PROTOCOL_HREF,
+                    Url::Src => &SAFE_PROTOCOL_SRC,
+                },
+            )
+        };
+        self.push(&url);
+    }
+
+    fn line_ending_if_needed(&mut self) {
+        CompileContext::line_ending_if_needed(self);
+    }
+
+    fn buffer(&mut self) {
+        CompileContext::buffer(self);
+    }
+
+    fn resume(&mut self) -> String {
+        assert!(
+            self.buffers.len() > 1,
+            "expected a buffer from `HtmlWriter::buffer` to resume"
+        );
+        CompileContext::resume(self)
+    }
+
+    fn options(&self) -> &CompileOptions {
+        self.options
+    }
+}
+
+/// Handle [`Enter`][Kind::Enter].
+fn enter(context: &mut CompileContext) {
+    // Constructs: written by their handlers, with their content as HTML.
+    let index = context.index;
+    if context.extension_skip.map_or(false, |until| index <= until) {
+        return;
+    }
+    if let Some(top) = context.extension_matches.last() {
+        if !top.is_inside(index) {
+            return;
+        }
+        // A token of a construct in its content, such as a line prefix.
+        if is_in_content(context.extension_names, &context.events[index]) {
+            context.extension_skip = Some(context.extension_exits[index]);
             return;
         }
     }
 
     if context.events[index].name == Name::Extension {
-        let found = collect_tokens(
-            context.events,
-            context.bytes,
-            context.extension_names,
-            &context.extension_exits,
-            index,
-        );
-        context.extension_matches.push(HtmlMatch {
-            end: found.end,
-            contents: found
-                .contents
-                .iter()
-                .map(|(_, enter, exit, is_document)| (*enter, *exit, *is_document))
-                .collect(),
-            content: 0,
-            excluded: found.excluded,
-            cursor: index,
-            inside: false,
-        });
+        on_enter_construct(context);
         return;
     }
 
@@ -474,35 +629,22 @@ fn exit(context: &mut CompileContext) {
         }
     }
     if let Some(top) = context.extension_matches.last_mut() {
-        if top.inside {
-            if let Some((_, _, is_document)) = top
-                .contents
-                .get(top.content)
-                .filter(|(_, exit, _)| *exit == index)
-            {
-                let is_document = *is_document;
-                top.inside = false;
-                top.content += 1;
-                top.cursor = index;
+        match top.content {
+            Some((_, exit, is_document)) if exit == index => {
+                top.content = None;
                 if is_document {
                     context.tight_stack.pop();
                 }
+                run_construct(context);
                 return;
             }
-        } else {
-            if index == top.end {
-                let text = own_text(
-                    context.events,
-                    context.bytes,
-                    top.cursor,
-                    index,
-                    &top.excluded,
-                );
-                let value = encode(&text, context.encode_html);
-                context.extension_matches.pop();
-                context.push(&value);
+            _ if top.is_inside(index) => {}
+            _ => {
+                if index == top.end {
+                    context.extension_matches.pop();
+                }
+                return;
             }
-            return;
         }
     }
 
