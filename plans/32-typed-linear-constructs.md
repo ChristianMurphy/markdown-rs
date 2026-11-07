@@ -424,6 +424,27 @@ The pieces follow.
 - A token in document content, such as a line prefix that strips the indent of an opening fence, can start or end inside a tab, as the indent of fenced code can, and as container prefixes already could. The rest of the tab is content, as after `>`. In the document content commit.
 - Alternatives the developer weighed: exporting `classify` at the crate root, or not at all; keeping `blank-line-in-content` with the port working around it, or forbidding content that ends with a line ending; letting any token of a flow construct split a tab, or none.
 
+### D69. `previous` at the start of text
+
+- Found while writing recipe 2 of the guide. The docs said `previous` is `'\n'` at the start of a line, and `None` "at the start", which reads as the start of the document. The code gives `None` at the start of text, the first line of each paragraph or heading, in containers too, and `'\n'` on its later lines, as micromark does: its text tokenizer starts with `previous` as `null`. After a character escape it is `None` too, so a construct cannot tell an escape from the start of text. An escaped marker is never tried, so a construct rarely needs to.
+- Chosen: keep the behavior, which matches micromark, and fix the docs in the text constructs, flow, and containers commits. The text constructs commit adds a test: `None` at the start of a paragraph, a heading, a block quote, and a list item, and not on a later line.
+- Alternative: `'\n'` at the start of text too, so every line start looks the same. It would differ from micromark, and `None` would then mean an escape or the start of the document.
+
+### As built: the public API check
+
+- Each public item of `extension` was checked against D59. Changed: `Debug` for `Step`, `Ctx`, and `Consumed`, which shows no fields, and `#[non_exhaustive]` on `RunToken`, so runs can gain a token in a minor release.
+- Already held: `Reach`, `ContentType`, `HtmlEvent`, `Url`, and `Token` are `#[non_exhaustive]`; `Place` is sealed, and `PlaceKind` is hidden; `Step`, `Ctx`, `Consumed`, and `HtmlWriter` have private fields, so they can gain fields; only `assert_linear` exists for tests, behind `test-util`.
+
+### As built: the guide
+
+- One docs commit, last in PR 270, as the developer chose, rather than docs in each commit.
+- `extension::guide`: the words, the tables for place, reach, and HTML route, the table from micromark, and security. `extension::guide::tutorial` builds a mention in three steps. `extension::guide::recipes` has recipes 1 to 8 and 11; `markdown_processor::guide` has 9 and 10. The readme links the guide, and its Security section says what D58 asks.
+- Every example is a doctest. Recipe 11 runs with and without `test-util`, and recipes 7, 8, and 11 pass with `test-util`, so they break no rule.
+- Differences from D58:
+  - Recipe 2 needs no `previous` check for `\{{`: the escape leaves one `{`, which cannot open (D69).
+  - Recipe 4 skips backtick runs with an attempt, as D61 says. A run that fails has a size no later run has, so few fail within 999 bytes. On `:x[` repeated, time doubles when input doubles, and is about 1.4 seconds for 48 KB in a release build; the recipe says the cap is also the cost.
+  - Recipe 10 turns an image alone in its paragraph into a `<figure>`: a transform works the same on a construct's node, matched by its `name`.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -495,7 +516,9 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 7. HTML handlers | D55, D57, D65 | the HTML handlers commit, after the derive | a mention as a `span`, in a block quote and an image `alt`; a link with a checked URL; content in a buffer; a match in content; flow matches at the start of a block quote, in list items, after a list, and in a container, which fail without D57; `resume` without a buffer; the same HTML through `to_html` and `Processor`; output equal to the parent without constructs on 600,000 documents, and with constructs on 200,000 but for line endings; callgrind −0.07% to +0.002% | Done |
 | 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
 | 9. Plugin ports, description | D66, D67, D68 | `feat/plugin-ports`, outside PR 270: mark, wiki_link, gfm_alert, admonition, directive | each through `to_html` and `Processor`, with the same HTML, and `assert_linear`; 100,000 fuzzed admonition documents; 252 of micromark-extension-directive's 255 cases, and 3 listed differences | Ports done; wiki_link found D66, admonition D67, directive D68; description to do |
-| 10. Public API check, message to adopters | D59, D60 | | | To do |
+| 10. Public API check | D59, D69 | fixes in the text constructs and delimiter runs commits (D59), and the text constructs, flow, and containers commits (D69) | `Debug` of `Step`, `Ctx`, and `Consumed`; `previous` at the start of text; CI job clean on each commit; builds on 1.62 | Done |
+| 11. Guide | D58 | the docs commit, last in PR 270 | every recipe and tutorial step as a doctest, in both modes; rustdoc and clippy with no warnings; builds on 1.62 | Done |
+| 12. Message to adopters | D60 | | | To do |
 
 ## Settled questions
 
