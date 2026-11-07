@@ -412,6 +412,18 @@ The pieces follow.
   - Keep the rules: the title would be a plain token that `to_mdast` parses with `markdown::to_mdast` apart, without positions or plugin syntax, and `to_html` writes as text.
   - Allow text content on any line: nothing needs it, and text content in the prefix of a later line is untested.
 
+### D68. What the directive port changed
+
+- Question: porting directives against micromark-extension-directive's 255 test cases found three limits of PR 270. The developer chose each fix.
+- `classify` is exported: `markdown::extension::{classify, CharacterKind}`, next to `Ctx::current_char` and `previous: Option<char>`, like micromark's `classifyCharacter`. A directive's name is defined by it; without it, a plugin misread non-ASCII punctuation (`:꙳` became a directive). In the text constructs commit.
+- Text content can start or end with blank lines, or be only whitespace, but not have a blank line between lines with other bytes. In the text content commit.
+  - `blank-line-in-content` guards a real panic: built-in text code (`partial_space_or_tab_eol`) asserts that text never has a blank line, and never ends right after a line ending, as a paragraph's text never does.
+  - So the core leaves a final line ending of text content, and any blank lines after it, out of the text it parses, as the last line ending of a paragraph is not its text. In flow, where line endings of content are line endings of flow, the content ends before them and they stay line endings. A failed attempt restores the new state.
+  - Evidence: 600,000 random documents with a text construct and 200,000 with a flow construct whose content starts or ends with blank lines set off no assertion, where the first try at this, with line endings in chunks of their own, set off 42.
+  - Three of micromark's cases end a label with a line ending, which it keeps; here that line ending is left out, and a backslash before it is no hard break, as at the end of a paragraph. The port's test lists them.
+- A token in document content, such as a line prefix that strips the indent of an opening fence, can start or end inside a tab, as the indent of fenced code can, and as container prefixes already could. The rest of the tab is content, as after `>`. In the document content commit.
+- Alternatives the developer weighed: exporting `classify` at the crate root, or not at all; keeping `blank-line-in-content` with the port working around it, or forbidding content that ends with a line ending; letting any token of a flow construct split a tab, or none.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -482,7 +494,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 6. `Reach::Pair`, `assert_linear` | D50, D51, D64 | the pairs commit, after the delimiter runs | the same trees with `Pair` as unbounded for a construct that stops at its first closer, on fixed inputs and 2,000 random documents; a nesting construct loses a match; `assert_linear` passes pairs, bytes, runs, flow, containers, GFM, and all together, and catches an unbounded construct alone, nesting, and among others; with the skip off, it fails `Pair`; output equal to the parent on 600,000 random documents; callgrind at most +0.021% | Done |
 | 7. HTML handlers | D55, D57, D65 | the HTML handlers commit, after the derive | a mention as a `span`, in a block quote and an image `alt`; a link with a checked URL; content in a buffer; a match in content; flow matches at the start of a block quote, in list items, after a list, and in a container, which fail without D57; `resume` without a buffer; the same HTML through `to_html` and `Processor`; output equal to the parent without constructs on 600,000 documents, and with constructs on 200,000 but for line endings; callgrind −0.07% to +0.002% | Done |
 | 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
-| 9. Plugin ports, description | D66, D67 | `feat/plugin-ports`, outside PR 270: mark, wiki_link, gfm_alert, admonition | each through `to_html` and `Processor`, with the same HTML, and `assert_linear`; 100,000 fuzzed admonition documents | In progress: directive to port; wiki_link found D66, admonition D67 |
+| 9. Plugin ports, description | D66, D67, D68 | `feat/plugin-ports`, outside PR 270: mark, wiki_link, gfm_alert, admonition, directive | each through `to_html` and `Processor`, with the same HTML, and `assert_linear`; 100,000 fuzzed admonition documents; 252 of micromark-extension-directive's 255 cases, and 3 listed differences | Ports done; wiki_link found D66, admonition D67, directive D68; description to do |
 | 10. Public API check, message to adopters | D59, D60 | | | To do |
 
 ## Settled questions
