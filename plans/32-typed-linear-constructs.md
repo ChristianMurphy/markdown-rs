@@ -403,6 +403,15 @@ The pieces follow.
   - No change: constructs that need later tokens render only through `Processor`, and as source in `to_html`.
 - Also found in the port, and fixed in the docs of `Reach::Pair`: the promise also fails for a construct that fails at a marker inside its opener. If a target cannot hold `[`, the match at the first `[` of `[[[a]]` fails at the third, so the match at the second is skipped. A construct that stops at each marker is linear without `Pair`, as the wiki link is; a test shows the lost match and the linearity.
 
+### D67. A container can hold a title on its first line
+
+- Question: porting admonitions (`!!! warning "Custom *title*"` and an indented body) found that a container could not hold a markdown title: `text-content-in-container` forbade text content in a container, and `consume-in-container-content` forbade consuming while any content was open.
+- Chosen: a container can enter text content on its first line, before its document content. `consume-in-container-content` applies to document content only, `container-tokens` needs the content open at `container()` to be document content, and `text-content-in-container` stays for later lines, whose tokens are prefixes in the document.
+- Evidence: the admonition port passes its tests (nesting, lists, lazy lines, setext headings, tabs, linearity, the same HTML in both paths), and 100,000 fuzzed documents gave no broken rule, and the same HTML in both paths but where 1.0.0 differs, at unclosed code at the end of a container, which PR 268 fixes.
+- Alternatives:
+  - Keep the rules: the title would be a plain token that `to_mdast` parses with `markdown::to_mdast` apart, without positions or plugin syntax, and `to_html` writes as text.
+  - Allow text content on any line: nothing needs it, and text content in the prefix of a later line is untested.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -473,7 +482,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 6. `Reach::Pair`, `assert_linear` | D50, D51, D64 | the pairs commit, after the delimiter runs | the same trees with `Pair` as unbounded for a construct that stops at its first closer, on fixed inputs and 2,000 random documents; a nesting construct loses a match; `assert_linear` passes pairs, bytes, runs, flow, containers, GFM, and all together, and catches an unbounded construct alone, nesting, and among others; with the skip off, it fails `Pair`; output equal to the parent on 600,000 random documents; callgrind at most +0.021% | Done |
 | 7. HTML handlers | D55, D57, D65 | the HTML handlers commit, after the derive | a mention as a `span`, in a block quote and an image `alt`; a link with a checked URL; content in a buffer; a match in content; flow matches at the start of a block quote, in list items, after a list, and in a container, which fail without D57; `resume` without a buffer; the same HTML through `to_html` and `Processor`; output equal to the parent without constructs on 600,000 documents, and with constructs on 200,000 but for line endings; callgrind −0.07% to +0.002% | Done |
 | 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
-| 9. Plugin ports, description | D66 | `feat/plugin-ports`, outside PR 270: mark | mark through `to_html` and `Processor`, the same HTML, and `assert_linear` | In progress: mark done; wiki_link found D66 |
+| 9. Plugin ports, description | D66, D67 | `feat/plugin-ports`, outside PR 270: mark, wiki_link, gfm_alert, admonition | each through `to_html` and `Processor`, with the same HTML, and `assert_linear`; 100,000 fuzzed admonition documents | In progress: directive to port; wiki_link found D66, admonition D67 |
 | 10. Public API check, message to adopters | D59, D60 | | | To do |
 
 ## Settled questions
