@@ -378,6 +378,21 @@ The pieces follow.
   - One construct, as D50 had it: shortest to call, but blind to interactions between a plugin's constructs and with GFM or MDX.
   - Both, as `assert_linear` and `assert_linear_with`: two functions to document and keep in step.
 
+### D65. Text events and URL kinds for HTML handlers
+
+- Question: D55 gave handlers `Enter(token)` and `Exit(token)`. Who writes the bytes a step consumed into a token, such as the `@` and the name of a mention, and how does a handler say which protocols a URL may have?
+- Chosen: a third event, `HtmlEvent::Text(token, value)`, for the bytes in a token outside the tokens in it, without container prefixes, with the innermost open token. The default handler writes it escaped, so a construct without a handler is written as before; a handler writes or drops it.
+- Chosen: `HtmlWriter::url(value, Url::Href | Url::Src)`, the two lists `to_html` uses for links and images, with `allow_any_img_src` for `Src`. The protocol lists stay hidden; a construct that needs others checks the URL itself.
+- As built:
+  - A match becomes steps when it starts, which the core gives the handler up to each content token, and after it. The core writes content between the enter and exit of its token, and leaves out tokens inside content, as `to_mdast` does.
+  - `tag` is left out in the `alt` of an image, like built-in markup and micromark's `this.tag`.
+  - `resume` without a buffer panics, naming the mistake.
+  - D57 covers containers too: a block match gets a line ending, unless one comes before it. Without it, a flow match ran on after `<blockquote>`, `<li>`, and `</ul>`; elsewhere the line ending before a block already came from the source.
+- Alternatives:
+  - `Enter` and `Exit` only, with the core writing the text: a handler could not drop markers, so a wiki link would show its brackets.
+  - `Enter` and `Exit` only, with handlers writing `token.value`: the value of a token includes the tokens in it, so writing it at each level repeats text, and the default could not write today's output.
+  - A protocol list in `url`: flexible, but it makes `SAFE_PROTOCOL_HREF` and `SAFE_PROTOCOL_SRC` public API.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -414,7 +429,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 4. The optional `markdown_derive` crate, placed after the delimiter runs and the pairs (D63).
 5. Text content, attempts, flow constructs (with D57), document content, containers (with `open_container`), and delimiter runs as `Reach::Attention`, as PR 270's commits are now.
 6. `Reach::Pair` and `assert_linear`, after the delimiter runs and before the derive (D64).
-7. HTML handlers (D55).
+7. HTML handlers (D55, D57, D65), after the derive.
 8. The `Processor` methods.
 9. Port the fork's plugins (wiki link, admonition, mark, directives) as a check on the API, and rewrite PR 270's description.
 10. Check each public item against D59, and draft the message to adopters (D60).
@@ -446,7 +461,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 4. `markdown_derive` | D48, D63 | the derive commit, after the delimiter runs; the `token-not-in-all` rule in the text constructs commit | the derived impl, a parse with derived content tokens, a renamed crate, an enum without variants, a `compile_fail` example for each of six errors, each checked to fail with its own message; the rule in both modes, failing without the fix; builds and runs on 1.62 | Done |
 | 5. Content, attempts, flow, containers, runs | D51 | text content, attempts, flow constructs, document content, containers, delimiter runs | 110 extension tests in both modes at the tip; CI job clean at each commit; builds on 1.62; output equal to each parent on 600,000 random documents; callgrind within +0.27% of each parent; `\|` containers like `>` on 12,000,000 fuzzed documents; runs at `~` like strikethrough on 2,400,000 | Done |
 | 6. `Reach::Pair`, `assert_linear` | D50, D51, D64 | the pairs commit, after the delimiter runs | the same trees with `Pair` as unbounded for a construct that stops at its first closer, on fixed inputs and 2,000 random documents; a nesting construct loses a match; `assert_linear` passes pairs, bytes, runs, flow, containers, GFM, and all together, and catches an unbounded construct alone, nesting, and among others; with the skip off, it fails `Pair`; output equal to the parent on 600,000 random documents; callgrind at most +0.021% | Done |
-| 7. HTML handlers | D55, D57 | | | To do |
+| 7. HTML handlers | D55, D57, D65 | the HTML handlers commit, after the derive | a mention as a `span`, in a block quote and an image `alt`; a link with a checked URL; content in a buffer; a match in content; flow matches at the start of a block quote, in list items, after a list, and in a container, which fail without D57; `resume` without a buffer; the same HTML through `to_html` and `Processor`; output equal to the parent without constructs on 600,000 documents, and with constructs on 200,000 but for line endings; callgrind −0.07% to +0.002% | Done |
 | 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
 | 9. Plugin ports, description | | | | To do |
 | 10. Public API check, message to adopters | D59, D60 | | | To do |
