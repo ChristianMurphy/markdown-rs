@@ -352,6 +352,32 @@ The pieces follow.
 - Attempts: `attempt(state, ok, nok)` with typed states; `nok` goes on with the data given when the attempt started.
 - Limits (the step budget, the reach, the depth of content and of attempts) end a match without a panic; only broken rules panic with `test-util`.
 
+### D63. The derive comes after the delimiter runs
+
+- Question: where in the series does the derive go? The plan put it right after text constructs, but `TokenType::content` arrives with text content, and `ContentType::Document` with document content.
+- Chosen: one commit after the delimiter runs, before the `Processor` methods, written once against the final `TokenType`. `markdown` depends on `markdown_derive` at an exact version, so the trait and the derive release together. The earlier commits keep hand-written impls, which stay the way without the `derive` feature.
+- Also chosen: a token missing from a hand-written `ALL` breaks the rule `token-not-in-all`, in the text constructs commit, instead of an `expect` that panicked in every build.
+- The developer weighed it for the long term: once PR 270 lands, the place of a commit in the series matters little; what lasts is a trait settled before the first release, and a derive that ships in lockstep with it.
+- Alternatives:
+  - Right after text constructs, as planned, with `content = text` added in the content commit and `content = document` in the document commit: three commits change the derive, and no one releases the states between them.
+  - A separate PR after PR 270: a smaller PR 270, but safe only if the trait is frozen there, since a change for the derive later would break released impls.
+  - A `macro_rules!` macro in `markdown`: no second crate to version and no `syn`, and it also lists variants once, but it reads less like Rust, and attributes per variant are clumsier.
+- `syn` 2.0.106, `quote` 1.0.41, and `proc-macro2` 1.0.103 build on 1.62, and a crate that derives `TokenType` builds and runs there, so `markdown_derive` declares 1.62, like `markdown`. The 1.62 check copies `markdown_derive` too.
+- `#[token(crate = "...")]` on the enum gives the path to `markdown` for a renamed dependency, as serde's `crate` attribute does.
+
+### D64. `assert_linear` takes `ParseOptions`
+
+- Question: D50 gave `assert_linear` one construct. What should it take?
+- Chosen: `assert_linear(&ParseOptions)`. It checks every construct in the options together, with the options a plugin really uses: GFM, MDX, constructs in all three places, and constructs that interact. One construct is `ParseOptions { text_constructs: vec![construct(x)], ..Default::default() }`.
+- As built:
+  - Documents come from the ASCII markers of all constructs, each alone and all together: a marker, twice, and before a letter, repeated with nothing, spaces, or line endings between, and in a block quote and in a list item, at 128, 256, and 512 repeats.
+  - It panics if a doubling more than triples the steps, plus a slack of 1,024 steps for small counts. A linear construct doubles; a quadratic one about quadruples.
+  - Steps are counted in `ParseState`, only with `test-util`. `parser::parse` is split into a check of the options, a new state, and the passes of the tokenizer, so the count is read when parsing returns an error, such as `flow-construct-late-failure`.
+  - The skip of `Reach::Pair` starts at the furthest byte a failed match read: a start at that byte is still tried, since the failure may come from it.
+- Alternatives:
+  - One construct, as D50 had it: shortest to call, but blind to interactions between a plugin's constructs and with GFM or MDX.
+  - Both, as `assert_linear` and `assert_linear_with`: two functions to document and keep in step.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -378,19 +404,6 @@ The pieces follow.
 - With constructs: within about 5% of 0906fe3, on the mention, wiki link and fenced container from the tests, on short documents and on `readme.md`.
 - `Reach::Pair` on `[[a ` × n: linear steps, measured by `assert_linear`.
 
-### D63. The derive comes after the delimiter runs
-
-- Question: where in the series does the derive go? The plan put it right after text constructs, but `TokenType::content` arrives with text content, and `ContentType::Document` with document content.
-- Chosen: one commit after the delimiter runs, before the `Processor` methods, written once against the final `TokenType`. `markdown` depends on `markdown_derive` at an exact version, so the trait and the derive release together. The earlier commits keep hand-written impls, which stay the way without the `derive` feature.
-- Also chosen: a token missing from a hand-written `ALL` breaks the rule `token-not-in-all`, in the text constructs commit, instead of an `expect` that panicked in every build.
-- The developer weighed it for the long term: once PR 270 lands, the place of a commit in the series matters little; what lasts is a trait settled before the first release, and a derive that ships in lockstep with it.
-- Alternatives:
-  - Right after text constructs, as planned, with `content = text` added in the content commit and `content = document` in the document commit: three commits change the derive, and no one releases the states between them.
-  - A separate PR after PR 270: a smaller PR 270, but safe only if the trait is frozen there, since a change for the derive later would break released impls.
-  - A `macro_rules!` macro in `markdown`: no second crate to version and no `syn`, and it also lists variants once, but it reads less like Rust, and attributes per variant are clumsier.
-- `syn` 2.0.106, `quote` 1.0.41, and `proc-macro2` 1.0.103 build on 1.62, and a crate that derives `TokenType` builds and runs there, so `markdown_derive` declares 1.62, like `markdown`. The 1.62 check copies `markdown_derive` too.
-- `#[token(crate = "...")]` on the enum gives the path to `markdown` for a renamed dependency, as serde's `crate` attribute does.
-
 ## Order of work, as a revision of PR 270
 
 PR 270 is revised in place, so the first release has the final API. The series is built on `ccr-30c42fe4-xadkx0`, on top of `feat/syntax-extensions`, and reaches PR 270 only after the developer approves it. The commit series keeps its shape: each commit adds one feature, with the typed API from the start, and passes the checks on its own.
@@ -398,9 +411,9 @@ PR 270 is revised in place, so the first release has the final API. The series i
 1. Stack on PR 230, which fixes CI on current stable, PR 258, which declares 1.62, and the fix for `previous` across container prefixes (D53), like PRs 259 to 262. There is no version raise (D62).
 2. hast, the custom mdast node with `h_name` (D56), mdast_util_to_hast, and markdown_processor, as in PRs 259 to 262.
 3. Text constructs: `Construct`, `Place`, typed states and tokens, `Ctx`, `Reach`, `previous` as a `char`, the outer rollback (D47 to D54).
-4. The optional `markdown_derive` crate, placed after the delimiter runs (D63).
+4. The optional `markdown_derive` crate, placed after the delimiter runs and the pairs (D63).
 5. Text content, attempts, flow constructs (with D57), document content, containers (with `open_container`), and delimiter runs as `Reach::Attention`, as PR 270's commits are now.
-6. `Reach::Pair` and `assert_linear`.
+6. `Reach::Pair` and `assert_linear`, after the delimiter runs and before the derive (D64).
 7. HTML handlers (D55).
 8. The `Processor` methods.
 9. Port the fork's plugins (wiki link, admonition, mark, directives) as a check on the API, and rewrite PR 270's description.
@@ -432,7 +445,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 3. Text constructs | D47 to D54 | the text constructs commit | 28 tests in both modes (with and without `test-util`), `compile_fail` examples, the differential test; CI job clean; builds on 1.62; callgrind −0.12% to +0.64% without constructs | Done |
 | 4. `markdown_derive` | D48, D63 | the derive commit, after the delimiter runs; the `token-not-in-all` rule in the text constructs commit | the derived impl, a parse with derived content tokens, a renamed crate, an enum without variants, a `compile_fail` example for each of six errors, each checked to fail with its own message; the rule in both modes, failing without the fix; builds and runs on 1.62 | Done |
 | 5. Content, attempts, flow, containers, runs | D51 | text content, attempts, flow constructs, document content, containers, delimiter runs | 110 extension tests in both modes at the tip; CI job clean at each commit; builds on 1.62; output equal to each parent on 600,000 random documents; callgrind within +0.27% of each parent; `\|` containers like `>` on 12,000,000 fuzzed documents; runs at `~` like strikethrough on 2,400,000 | Done |
-| 6. `Reach::Pair`, `assert_linear` | D50, D51 | | | To do |
+| 6. `Reach::Pair`, `assert_linear` | D50, D51, D64 | the pairs commit, after the delimiter runs | the same trees with `Pair` as unbounded for a construct that stops at its first closer, on fixed inputs and 2,000 random documents; a nesting construct loses a match; `assert_linear` passes pairs, bytes, runs, flow, containers, GFM, and all together, and catches an unbounded construct alone, nesting, and among others; with the skip off, it fails `Pair`; output equal to the parent on 600,000 random documents; callgrind at most +0.021% | Done |
 | 7. HTML handlers | D55, D57 | | | To do |
 | 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
 | 9. Plugin ports, description | | | | To do |
