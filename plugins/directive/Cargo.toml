@@ -1,0 +1,19 @@
+[dependencies]
+hast = { path = "../../hast" }
+markdown = { features = ["derive"], path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+markdown_processor = { features = ["test-util"], path = "../../markdown_processor" }
+hast_util_to_html = { path = "../../hast_util_to_html" }
+markdown = { features = ["derive", "test-util"], path = "../../" }
+pretty_assertions = { workspace = true }
+
+[package]
+description = "Port: directives (`:name[label]{attributes}`), from micromark-extension-directive"
+edition = "2018"
+license = "MIT"
+name = "directive"
+publish = false
+rust-version = "1.62"
+version = "0.0.0"
