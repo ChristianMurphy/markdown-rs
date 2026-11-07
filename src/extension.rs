@@ -463,6 +463,8 @@ pub enum ContentType {
     Document,
 }
 
+pub mod guide;
+
 /// Classify a character, such as [`Construct::previous`] or
 /// [`Ctx::current_char`], as built-in constructs do, such as attention to
 /// decide whether a run can open or close.
