@@ -507,7 +507,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 
 | Step | Decisions | Commit | Tests | Status |
 |---|---|---|---|---|
-| 1. Base: PRs 230 and 258, the prefix fix | D53, D62 | the CI fix, the 1.62 minimum, the prefix fix | CI job clean on each commit; the prefix fix's tests fail on 1.0.0 and pass with it | Done |
+| 1. Base: PRs 230 and 258, the prefix fix (PR 288) | D53, D62 | the CI fix, the 1.62 minimum, the prefix fix | CI job clean on each commit; the prefix fix's tests fail on 1.0.0 and pass with it | Done |
 | 2. hast, mdast, processor crates | D56 | the hast, custom node, mdast_util_to_hast and processor commits | `cite` and `longDesc` checks; `h_name` with `Debug` and serde; elements, properties and value with `h_name`; a handler before `h_name`; through `Processor`, with a `javascript:` `href` emptied | Done |
 | 3. Text constructs | D47 to D54 | the text constructs commit | 28 tests in both modes (with and without `test-util`), `compile_fail` examples, the differential test; CI job clean; builds on 1.62; callgrind −0.12% to +0.64% without constructs | Done |
 | 4. `markdown_derive` | D48, D63 | the derive commit, after the delimiter runs; the `token-not-in-all` rule in the text constructs commit | the derived impl, a parse with derived content tokens, a renamed crate, an enum without variants, a `compile_fail` example for each of six errors, each checked to fail with its own message; the rule in both modes, failing without the fix; builds and runs on 1.62 | Done |
@@ -522,6 +522,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 
 ## Settled questions
 
+- The prefix fix is PR 288, on 1.0.0. PR 270 carries the same commit, with the same diff and message, on top of its copies of PRs 230 and 258.
 - The other stacked PRs: PR 230's branch carries the same CI fix as PR 270's copy. PRs 258 to 262 stay as they are, and PR 270 is rebased once they land.
 
 - `hChildren`: left out (D56).
