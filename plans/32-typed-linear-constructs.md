@@ -518,7 +518,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 9. Plugin ports, description | D66, D67, D68 | `feat/plugin-ports`, outside PR 270: mark, wiki_link, gfm_alert, admonition, directive | each through `to_html` and `Processor`, with the same HTML, and `assert_linear`; 100,000 fuzzed admonition documents; 252 of micromark-extension-directive's 255 cases, and 3 listed differences | Ports done; wiki_link found D66, admonition D67, directive D68; description to do |
 | 10. Public API check | D59, D69 | fixes in the text constructs and delimiter runs commits (D59), and the text constructs, flow, and containers commits (D69) | `Debug` of `Step`, `Ctx`, and `Consumed`; `previous` at the start of text; CI job clean on each commit; builds on 1.62 | Done |
 | 11. Guide | D58 | the docs commit, last in PR 270 | every recipe and tutorial step as a doctest, in both modes; rustdoc and clippy with no warnings; builds on 1.62 | Done |
-| 12. Message to adopters | D60 | | | To do |
+| 12. Message to adopters | D60 | a draft, for the developer to post on PR 270 | | Drafted |
 
 ## Settled questions
 
