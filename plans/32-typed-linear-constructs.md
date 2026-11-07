@@ -393,6 +393,16 @@ The pieces follow.
   - `Enter` and `Exit` only, with handlers writing `token.value`: the value of a token includes the tokens in it, so writing it at each level repeats text, and the default could not write today's output.
   - A protocol list in `url`: flexible, but it makes `SAFE_PROTOCOL_HREF` and `SAFE_PROTOCOL_SRC` public API.
 
+### D66. HTML handlers get the tokens of the match
+
+- Question: porting the wiki link plugin found that a handler, `&self` with one event at a time, cannot use a later token at an earlier event. A wiki link writes `<a href>` at its start, then its alias or, without one, its target, and learns whether it has an alias only later. A directive's `{attrs}` come after its label. micromark handlers have `this.setData` and `getData` for this.
+- Chosen: `fn html(&self, event, tokens: &[Token<T>], w)`. Every call gets all the tokens of the match, as `to_mdast` gets them but without children: read-only, with no state for an author to manage across events.
+- As built: the typed tokens are made from the match's tokens for each call, borrowing their values, which costs one `Vec` per event, and only where a construct matches.
+- Alternatives:
+  - Per-match state, as an associated `type HtmlState: Default` passed as `&mut`, like `setData`: the most flexible, but one more associated type on every construct, and state to reason about across events.
+  - No change: constructs that need later tokens render only through `Processor`, and as source in `to_html`.
+- Also found in the port, and fixed in the docs of `Reach::Pair`: the promise also fails for a construct that fails at a marker inside its opener. If a target cannot hold `[`, the match at the first `[` of `[[[a]]` fails at the third, so the match at the second is skipped. A construct that stops at each marker is linear without `Pair`, as the wiki link is; a test shows the lost match and the linearity.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -463,7 +473,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 6. `Reach::Pair`, `assert_linear` | D50, D51, D64 | the pairs commit, after the delimiter runs | the same trees with `Pair` as unbounded for a construct that stops at its first closer, on fixed inputs and 2,000 random documents; a nesting construct loses a match; `assert_linear` passes pairs, bytes, runs, flow, containers, GFM, and all together, and catches an unbounded construct alone, nesting, and among others; with the skip off, it fails `Pair`; output equal to the parent on 600,000 random documents; callgrind at most +0.021% | Done |
 | 7. HTML handlers | D55, D57, D65 | the HTML handlers commit, after the derive | a mention as a `span`, in a block quote and an image `alt`; a link with a checked URL; content in a buffer; a match in content; flow matches at the start of a block quote, in list items, after a list, and in a container, which fail without D57; `resume` without a buffer; the same HTML through `to_html` and `Processor`; output equal to the parent without constructs on 600,000 documents, and with constructs on 200,000 but for line endings; callgrind −0.07% to +0.002% | Done |
 | 8. `Processor` methods | | the `Processor` commit | each method takes a construct of its place; tests through `process` | Done |
-| 9. Plugin ports, description | | | | To do |
+| 9. Plugin ports, description | D66 | `feat/plugin-ports`, outside PR 270: mark | mark through `to_html` and `Processor`, the same HTML, and `assert_linear` | In progress: mark done; wiki_link found D66 |
 | 10. Public API check, message to adopters | D59, D60 | | | To do |
 
 ## Settled questions
