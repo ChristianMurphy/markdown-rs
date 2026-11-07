@@ -445,6 +445,57 @@ The pieces follow.
   - Recipe 4 skips backtick runs with an attempt, as D61 says. A run that fails has a size no later run has, so few fail within 999 bytes. On `:x[` repeated, time doubles when input doubles, and is about 1.4 seconds for 48 KB in a release build; the recipe says the cap is also the cost.
   - Recipe 10 turns an image alone in its paragraph into a `<figure>`: a transform works the same on a construct's node, matched by its `name`.
 
+### Round 2: goals and measures
+
+- Goal, as the developer set it: before release, make constructs safer for users and easier to write and test, without being slower or using more memory. Each change goes into the commit that introduced the code it changes, and the ports and guide follow.
+- Measures:
+  - Speed: callgrind on each commit. Without constructs, within 1% of the parent. With the five ports on their samples, no more instructions than the tip before this round.
+  - Memory: a counting allocator on the five ports, 200 matches per document. Bytes per match stop growing with tokens times events, and allocations per match go down for every port.
+  - Safety: a `compile_fail` doctest for each new type rule; tests that limits and late failures give `Ok`; the existing fuzzers plus one over all five ports (no `Err`, no panic, `to_html` equal to `Processor` where both apply); a security review of `HtmlWriter` and the `to_html` path by a reviewer who did not write it.
+  - Ease: lines of construct code in the ports and recipes go down, the `find`, `to_vec` and five-call attribute patterns go away, and every recipe stays one doctest.
+  - Testing: the ports and recipe 11 use `trace`, `assert_linear_with` and `assert_same_html`.
+- Not in this round: factories, `Send + Sync` constructs, a `reach` without a default, a budget for the whole document, resolvers.
+
+### D70. A late failure degrades instead of erroring
+
+- Question: hostile input can make parsing return `Err`: 33 nested fenced containers reach the limit of 32 content passes after the first line, which is `flow-construct-late-failure`. How do flow constructs stay error-free?
+- Chosen: no error. A `nok` after the first line, outside an attempt, undoes the current line and ends the construct before it; the line then parses as other markdown. A limit after the first line does the same. Content too deep to parse becomes text. With `test-util`, a late `nok` panics with the rule `nok-after-first-line`. `flow-construct-late-failure` goes away, so markdown again has no syntax errors outside MDX.
+- Prototype first. If ending before a line cannot be done cleanly, fall back: limits degrade, and a late `nok` stays an error.
+- Alternatives:
+  - A typed body phase without `nok`, as a phase on `Ctx` or a separate `body_step`. A step has one signature, so its context cannot change type mid-match; and attempts in a body, such as the check for a closing fence, need `nok` to fail. So the guarantee cannot be checked at compile time without forbidding attempts in bodies.
+  - The split with degrade: more API for no compile-time gain.
+
+### D71. HTML from constructs cannot inject markup
+
+- Chosen:
+  - `HtmlWriter::tag` takes `&'static str`, so input cannot reach it.
+  - `HtmlWriter::attr(name, value)` writes ` name="value"` with the value escaped. A name must match `[a-zA-Z][a-zA-Z0-9_:.-]*`. Without `allow_dangerous_html`, names starting with `on`, and `style`, `srcdoc` and similar, are left out. URL attributes (`href`, `src`, `action`, `formaction`, `poster`, `cite`, and others) go through the protocol check of `url`.
+  - `HtmlWriter::raw(value)` writes markup only with `allow_dangerous_html`, and otherwise escapes it, as raw HTML in markdown is.
+- Alternatives: an allowlist of attribute names, safer but stricter; keeping `tag(&str)` and documenting it, as micromark's `this.tag` is.
+
+### D72. Testing helpers
+
+- Chosen, under `test-util`:
+  - `extension::trace(input, &options)`: each step of each construct, with its byte, state, result, and the ends of attempts. `Construct::State` gains a `Debug` bound for it.
+  - `extension::assert_linear_with(&options, seeds)`: `assert_linear` that also repeats patterns from the author, as marker-only documents missed recipe 4's `:x[`.
+  - A rule panic names the byte offset and the state of the step, as well as the rule.
+  - `markdown_processor::assert_same_html(&processor, inputs)`, behind a `test-util` feature of that crate, compares `to_html` with `Processor`.
+- Alternatives: a trace in production behind a callback (more surface, a field in `ParseOptions` that is not `Send`); leaving debugging to logs.
+
+### D73. Token helpers
+
+- Chosen: an extension trait on slices of tokens, with `get(name)`, `value(name)`, and `take_children(name)`, used by `to_mdast` and `html` alike. Helpers over slices remove the reason the directive port cloned its tokens with `to_vec`.
+- Alternative: a `Tokens` type in place of slices and vectors, which changes both signatures.
+
+### D74. Fewer allocations, without API changes
+
+- Measured with a counting allocator, 200 matches: `to_html` of inline directives allocated 49.4 MB, as the wrapper copied every token of a match into a new `Vec` for each HTML event.
+- Chosen:
+  - Type the tokens once per run of a handler, and pass the events through a callback. Prototyped: directives went from 49.4 MB to 13.2 MB, 55,307 to 41,907 allocations, and 7.0 to 5.1 ms; all tests pass.
+  - Reuse the buffers that gather a match's tokens, in both compilers.
+  - Keep each construct's container states in its slot, instead of a new box on each line.
+- Not now: a tokenizer for each content token (about 40 allocations per label), which micromark has too; owned data in `mdast::Custom`, as every mdast node has.
+
 ## Not changed
 
 - `Processor::add_text_construct`, `add_flow_construct` and `add_document_construct` keep their names. They take a `Construct` of the matching place and wrap it with `construct()`.
@@ -519,6 +570,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 10. Public API check | D59, D69 | fixes in the text constructs and delimiter runs commits (D59), and the text constructs, flow, and containers commits (D69) | `Debug` of `Step`, `Ctx`, and `Consumed`; `previous` at the start of text; CI job clean on each commit; builds on 1.62 | Done |
 | 11. Guide | D58 | the docs commit, last in PR 270 | every recipe and tutorial step as a doctest, in both modes; rustdoc and clippy with no warnings; builds on 1.62 | Done |
 | 12. Message to adopters | D60 | a draft, for the developer to post on PR 270 | | Drafted |
+| 13. Round 2: safety, ease, memory, testing | D70 to D74 | folded into the commits that own the code | the round 2 measures | In progress |
 
 ## Settled questions
 
