@@ -474,11 +474,37 @@ pub use crate::util::char::{classify, Kind as CharacterKind};
 pub enum Reach {
     /// No bound (default): parsing can be quadratic on input that makes
     /// matches fail after reading far.
+    /// With the `test-util` feature, `extension::assert_linear` finds that.
     Unbounded,
     /// A match reads at most this many bytes from its start: a step at a
     /// byte after them does not match, so a match that ends before a byte
     /// counts it too.
     Bytes(usize),
+    /// A match scans to a closer, such as `]]` in `[[a]]`, without a bound:
+    /// after a match in text fails, the construct is not tried again at its
+    /// markers before the furthest byte that match read, failed attempts
+    /// included, so each byte is read by at most one failed match, as cmark
+    /// does for runs of backticks, and parsing stays linear.
+    ///
+    /// That is a promise that a match cannot start between them either,
+    /// which holds for a construct that stops at its first closer and whose
+    /// opener cannot start inside the bytes a failed match read.
+    /// A construct that breaks it loses its own matches:
+    ///
+    /// * one that nests, counting `[[` against `]]`: in `[[a [[b]]`, the
+    ///   failed match at the first `[[` reads to the end, so the second is
+    ///   not tried; such a construct needs [`Reach::Bytes`]
+    /// * one that fails at a marker inside its opener: if a target cannot
+    ///   hold `[`, the match at the first `[` of `[[[a]]` fails at the
+    ///   third, so the one at the second is not tried; such a construct
+    ///   can let the failed match end before its opener, or stop at each
+    ///   marker, which keeps it linear without `Pair`
+    ///
+    /// Content of a match is parsed later and apart, so a failure outside it
+    /// never skips markers in it.
+    /// In flow and containers, which are tried once per line, it is the
+    /// same as [`Reach::Unbounded`].
+    Pair,
     /// A delimiter run in text, like `==` in `==a==`, with the sizes of a
     /// run that can pair, with the same size on both sides.
     ///
@@ -590,6 +616,10 @@ impl TokenType for RunToken {
 /// container prefix counts a step for each of its bytes; and a match reads
 /// at most as far as [`reach`][Self::reach] allows; past either, it does
 /// not match.
+/// So a match is linear in the bytes it reads, but a construct that reads
+/// far and then fails, at marker after marker, makes parsing quadratic,
+/// unless its reach is [`Reach::Bytes`] or [`Reach::Pair`]; with the
+/// `test-util` feature, `extension::assert_linear` checks that.
 /// Attempts nest at most 256 deep; a deeper attempt fails.
 /// A flow construct decides on its first line: after it consumed a line
 /// ending, `nok` is the parse error `flow-construct-late-failure`.
@@ -995,6 +1025,9 @@ pub(crate) struct ExtensionState {
     /// States that containers gave for their next lines; a container keeps
     /// the index of its own in `size`.
     containers: Vec<Box<dyn Any>>,
+    /// For each construct with [`Reach::Pair`], by index, the byte before
+    /// which its markers are skipped, after a failed match read to it.
+    pair_until: Vec<usize>,
 }
 
 /// Where a flow construct is in its lines.
@@ -1835,6 +1868,170 @@ pub(crate) fn to_mdast(options: &ParseOptions, index: u8, tokens: Vec<RawToken>)
     erased(options, index).to_mdast(tokens)
 }
 
+/// Check that parsing with the constructs in `options` takes work linear in
+/// the size of the document, in the tests of constructs (`test-util`
+/// feature).
+///
+/// It parses documents made of the ASCII markers of the constructs, each
+/// alone and all together: a marker, twice, and before a letter, repeated
+/// with nothing, spaces, or line endings between, and in a block quote and
+/// in a list item, at 128, 256, and 512 repeats.
+/// It counts the steps that constructs take, not time, so it gives the same
+/// answer on any machine.
+///
+/// ```
+/// use markdown::{
+///     extension::{assert_linear, construct, Construct, Ctx, Reach, Step, Text, Token, TokenType},
+///     mdast::{Custom, Node},
+///     ParseOptions,
+/// };
+///
+/// #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// enum WikiToken {
+///     Wiki,
+///     Target,
+/// }
+///
+/// impl TokenType for WikiToken {
+///     const ALL: &'static [Self] = &[Self::Wiki, Self::Target];
+///
+///     fn name(self) -> &'static str {
+///         match self {
+///             Self::Wiki => "wiki",
+///             Self::Target => "wikiTarget",
+///         }
+///     }
+/// }
+///
+/// /// `[[`, a target, and `]]`.
+/// struct Wiki(Reach);
+///
+/// impl Construct for Wiki {
+///     type Place = Text;
+///     type State = u8;
+///     type Token = WikiToken;
+///
+///     fn markers(&self) -> &[u8] {
+///         b"["
+///     }
+///
+///     fn start(&self) -> u8 {
+///         0
+///     }
+///
+///     fn reach(&self) -> Reach {
+///         self.0
+///     }
+///
+///     fn step(&self, state: u8, t: Ctx<'_, '_, Self>) -> Step<Self> {
+///         match (state, t.current()) {
+///             (0, Some(b'[')) => t.enter(WikiToken::Wiki).consume().next(1),
+///             (1, Some(b'[')) => t.consume().next(2),
+///             (2, Some(b']')) => t.nok(),
+///             (2, Some(_)) => t.enter(WikiToken::Target).consume().next(3),
+///             (3, Some(b']')) => t.exit().consume().next(4),
+///             (3, Some(_)) => t.consume().next(3),
+///             (4, Some(b']')) => t.consume().exit().ok(),
+///             _ => t.nok(),
+///         }
+///     }
+///
+///     fn to_mdast(&self, _: Vec<Token<'_, WikiToken>>) -> Node {
+///         Node::Custom(Custom::default())
+///     }
+/// }
+///
+/// let options = |reach| ParseOptions {
+///     text_constructs: vec![construct(Wiki(reach))],
+///     ..ParseOptions::default()
+/// };
+///
+/// // `[[a [[a [[a …` without `]]`: each `[[` reads to the end, unless it
+/// // skips what a failed match read.
+/// assert_linear(&options(Reach::Pair));
+/// assert!(std::panic::catch_unwind(|| assert_linear(&options(Reach::Unbounded))).is_err());
+/// ```
+///
+/// # Panics
+///
+/// If doubling a document more than triples the steps, with the document,
+/// or if parsing with `options` returns an error before it starts, such as
+/// `too-many-constructs`.
+/// With `test-util`, a construct that breaks a rule panics too.
+#[cfg(feature = "test-util")]
+pub fn assert_linear(options: &ParseOptions) {
+    let count = options.text_constructs.len()
+        + options.flow_constructs.len()
+        + options.document_constructs.len();
+    let mut markers: Vec<String> = vec![];
+    let mut all = String::new();
+
+    for index in 0..count {
+        let index = u8::try_from(index).unwrap_or(u8::MAX);
+        for &byte in erased(options, index).markers() {
+            let marker = String::from(char::from(byte));
+            if byte.is_ascii() && byte != b'\n' && byte != b'\r' && !markers.contains(&marker) {
+                all.push(char::from(byte));
+                markers.push(marker);
+            }
+        }
+    }
+
+    if markers.len() > 1 {
+        markers.push(all);
+    }
+
+    for marker in &markers {
+        let units = [
+            marker.clone(),
+            alloc::format!("{marker}{marker}"),
+            alloc::format!("{marker}a"),
+            alloc::format!("{marker}{marker}a"),
+        ];
+        for unit in &units {
+            // Before the document, and between units.
+            for (before, between) in [
+                ("", ""),
+                ("", " "),
+                ("", "\n"),
+                ("> ", "\n> "),
+                ("- ", "\n  "),
+            ] {
+                let document = |size: usize| {
+                    let mut document = String::from(before);
+                    for index in 0..size {
+                        if index > 0 {
+                            document.push_str(between);
+                        }
+                        document.push_str(unit);
+                    }
+                    document
+                };
+                let mut last: Option<(usize, usize)> = None;
+
+                for size in [128, 256, 512] {
+                    let steps = match crate::parser::extension_steps(&document(size), options) {
+                        Ok(steps) => steps,
+                        Err(message) => panic!("expected options that parse, got: {}", message),
+                    };
+                    if let Some((last_size, last_steps)) = last {
+                        assert!(
+                            steps <= last_steps * 3 + 1024,
+                            "expected steps of constructs linear in the size of the document, but {} repeats of {:?} took {} steps, and {} took {}",
+                            last_size,
+                            alloc::format!("{before}{unit}{between}"),
+                            last_steps,
+                            size,
+                            steps
+                        );
+                    }
+                    last = Some((size, steps));
+                }
+            }
+        }
+    }
+}
+
 /// Construct at `index`: text constructs, then flow, then containers.
 fn erased(options: &ParseOptions, index: u8) -> &dyn ErasedConstruct {
     let mut index = usize::from(index);
@@ -2026,8 +2223,15 @@ pub(crate) fn attempt_nok(tokenizer: &mut Tokenizer) -> State {
 /// Run the current construct, enforcing the rules of [`Construct`].
 pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
     let point = tokenizer.point.index;
+    #[cfg(feature = "test-util")]
+    let parse_state = tokenizer.parse_state;
     let tokenize_state = ext_mut(tokenizer);
-    tokenize_state.steps += point.saturating_sub(tokenize_state.at).max(1);
+    let steps = point.saturating_sub(tokenize_state.at).max(1);
+    #[cfg(feature = "test-util")]
+    parse_state
+        .extension_steps
+        .set(parse_state.extension_steps.get() + steps);
+    tokenize_state.steps += steps;
     tokenize_state.at = point;
     tokenize_state.furthest = tokenize_state.furthest.max(point);
     // Work is linear in the bytes a match reaches, whatever its attempts do.
@@ -2040,7 +2244,7 @@ pub(crate) fn step(tokenizer: &mut Tokenizer) -> State {
     let is_flow = place == PlaceKind::Flow;
 
     let within_reach = match construct.reach() {
-        Reach::Unbounded | Reach::Attention(_) => true,
+        Reach::Unbounded | Reach::Pair | Reach::Attention(_) => true,
         // At the end, there is nothing to read.
         Reach::Bytes(bytes) => {
             tokenizer.current.is_none() || tokenizer.point.index - ext(tokenizer).start < bytes
@@ -2217,8 +2421,39 @@ fn finish(tokenizer: &mut Tokenizer, step: RawStep, is_flow: bool, line_ending: 
                 source: Box::new("markdown-rs".into()),
             })
         }
-        RawStep::Nok => State::Nok,
+        RawStep::Nok => {
+            if !in_attempt {
+                skip_pairs(tokenizer);
+            }
+            State::Nok
+        }
     }
+}
+
+/// After a failed match of a text construct with [`Reach::Pair`], skip its
+/// markers up to the furthest byte the match read.
+fn skip_pairs(tokenizer: &mut Tokenizer) {
+    let options = tokenizer.parse_state.options;
+    let state = ext_mut(tokenizer);
+    let construct = erased(options, state.index);
+    if construct.place() == PlaceKind::Text && construct.reach() == Reach::Pair {
+        let index = usize::from(state.index);
+        if state.pair_until.len() <= index {
+            state.pair_until.resize(index + 1, 0);
+        }
+        state.pair_until[index] = state.pair_until[index].max(state.furthest);
+    }
+}
+
+/// Whether the text construct at `index` is not tried at the current byte,
+/// which a failed match of it with [`Reach::Pair`] read past.
+pub(crate) fn is_pair_skipped(tokenizer: &Tokenizer, index: u8) -> bool {
+    tokenizer
+        .tokenize_state
+        .extension
+        .as_deref()
+        .and_then(|state| state.pair_until.get(usize::from(index)))
+        .map_or(false, |until| tokenizer.point.index < *until)
 }
 
 /// A construct broke `rule`: it does not match, and with `test-util`, that
