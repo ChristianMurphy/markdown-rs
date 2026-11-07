@@ -1,0 +1,16 @@
+[dependencies]
+hast = { path = "../../hast" }
+markdown = { path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[package]
+description = "Port: GitHub alerts (`> [!NOTE]`), as a transform"
+edition = "2018"
+license = "MIT"
+name = "gfm_alert"
+publish = false
+rust-version = "1.62"
+version = "0.0.0"
