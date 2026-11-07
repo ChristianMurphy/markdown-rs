@@ -1,0 +1,18 @@
+[dependencies]
+hast = { path = "../../hast" }
+markdown = { features = ["derive"], path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+markdown_processor = { features = ["test-util"], path = "../../markdown_processor" }
+markdown = { features = ["derive", "test-util"], path = "../../" }
+pretty_assertions = { workspace = true }
+
+[package]
+description = "Port: admonitions (`!!! note`), as a container"
+edition = "2018"
+license = "MIT"
+name = "admonition"
+publish = false
+rust-version = "1.62"
+version = "0.0.0"
