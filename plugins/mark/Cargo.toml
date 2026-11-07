@@ -1,0 +1,17 @@
+[dependencies]
+markdown = { path = "../../" }
+markdown_processor = { path = "../../markdown_processor" }
+
+[dev-dependencies]
+markdown_processor = { features = ["test-util"], path = "../../markdown_processor" }
+markdown = { features = ["test-util"], path = "../../" }
+pretty_assertions = { workspace = true }
+
+[package]
+description = "Port: highlighted text (`==mark==`) as a delimiter run"
+edition = "2018"
+license = "MIT"
+name = "mark"
+publish = false
+rust-version = "1.62"
+version = "0.0.0"
