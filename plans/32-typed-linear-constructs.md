@@ -591,7 +591,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 10. Public API check | D59, D69 | fixes in the text constructs and delimiter runs commits (D59), and the text constructs, flow, and containers commits (D69) | `Debug` of `Step`, `Ctx`, and `Consumed`; `previous` at the start of text; CI job clean on each commit; builds on 1.62 | Done |
 | 11. Guide | D58 | the docs commit, last in PR 270 | every recipe and tutorial step as a doctest, in both modes; rustdoc and clippy with no warnings; builds on 1.62 | Done |
 | 12. Message to adopters | D60 | a draft, for the developer to post on PR 270 | | Drafted |
-| 13. Round 2: safety, ease, memory, testing | D70 to D74 | folded into the commits that own the code | the round 2 measures, all met at the tip; per-commit CI and callgrind running | Folded |
+| 13. Round 2: safety, ease, memory, testing | D70 to D74 | folded into the commits that own the code | the round 2 measures, met at the tip and on the folded branch; CI job clean on each commit, ports included; callgrind within 0.63% of each parent without constructs; builds on 1.62 | Done, pushed as fc0df44 (PR 270) and f5d8ff7 (ports) |
 
 ## Settled questions
 
