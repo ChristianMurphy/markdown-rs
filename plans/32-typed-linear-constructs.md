@@ -488,7 +488,7 @@ The pieces follow.
 
 ### D73. Token helpers
 
-- Chosen: an extension trait on slices of tokens, with `get(name)`, `value(name)`, and `take_children(name)`, used by `to_mdast` and `html` alike. Helpers over slices remove the reason the directive port cloned its tokens with `to_vec`.
+- Chosen: an extension trait on slices of tokens, `TokenSlice`, with `token(name)`, `value(name)`, and `take_children(name)`, used by `to_mdast` and `html` alike. Helpers over slices remove the reason the directive port cloned its tokens with `to_vec`.
 - Alternative: a `Tokens` type in place of slices and vectors, which changes both signatures.
 
 ### D74. Fewer allocations, without API changes
@@ -499,6 +499,23 @@ The pieces follow.
   - Reuse the buffers that gather a match's tokens, in both compilers.
   - Keep each construct's container states in its slot, instead of a new box on each line.
 - Not now: a tokenizer for each content token (about 40 allocations per label), which micromark has too; owned data in `mdast::Custom`, as every mdast node has.
+
+### As built: round 2
+
+- Where each change went, by the code it changes:
+  - text constructs: `own_text` without a temporary `Vec`.
+  - text content: `TokenSlice`, where tokens gain children. Its methods are `token`, `value`, and `take_children`: `get` would be the slice's own `get(index)`.
+  - flow constructs: D70, with `Tokenizer::snapshot` and `restore`; document content: a body too deep ends its construct.
+  - containers: container states in the construct's slot; gathering tokens with the exits of events, which this commit adds.
+  - pairs and linearity: `trace`, the `Debug` bound, the details of rule panics, and `assert_linear_with`, next to `assert_linear`, as test helpers; every event they record exists by then.
+  - HTML handlers: per-run typing, `tag`, `attr`, `raw`, `html`, `Html`, `Url::Image`, and the fixes from the review.
+  - `Processor`: `assert_same_html`, behind `test-util` of `markdown_processor`, which compares line endings as `\n`, as `to_html` keeps those of the document.
+  - docs and ports: the recipes and ports use the new helpers.
+- Measured at the tip, against the tip before round 2:
+  - Without constructs, callgrind within 0.02% on every document.
+  - With constructs, the ports take 1.4% to 43% fewer instructions in both paths, and 13% to 83% fewer allocations; bytes allocated fall or stay level.
+  - A fuzzer over the five ports: 400,000 documents, no error, no panic, and no difference between `to_html` and `Processor` that plugins add. Without plugins, the two differ on some documents in code spans that hold line endings, and 1.0.0's list bug after unclosed code panics, which PR 267 fixes.
+  - Ports and recipes: `find` lookups 10 to 0, `to_vec` clones 2 to 0, hand-written attributes 2 to 0; construct code 85 lines shorter, apart from recipe 11, which documents the new helpers.
 
 ## Not changed
 
@@ -574,7 +591,7 @@ PR 270 is revised in place, so the first release has the final API. The series i
 | 10. Public API check | D59, D69 | fixes in the text constructs and delimiter runs commits (D59), and the text constructs, flow, and containers commits (D69) | `Debug` of `Step`, `Ctx`, and `Consumed`; `previous` at the start of text; CI job clean on each commit; builds on 1.62 | Done |
 | 11. Guide | D58 | the docs commit, last in PR 270 | every recipe and tutorial step as a doctest, in both modes; rustdoc and clippy with no warnings; builds on 1.62 | Done |
 | 12. Message to adopters | D60 | a draft, for the developer to post on PR 270 | | Drafted |
-| 13. Round 2: safety, ease, memory, testing | D70 to D74 | folded into the commits that own the code | the round 2 measures | In progress |
+| 13. Round 2: safety, ease, memory, testing | D70 to D74 | folded into the commits that own the code | the round 2 measures, all met at the tip; per-commit CI and callgrind running | Folded |
 
 ## Settled questions
 
