@@ -469,9 +469,13 @@ The pieces follow.
 
 - Chosen:
   - `HtmlWriter::tag` takes `&'static str`, so input cannot reach it.
-  - `HtmlWriter::attr(name, value)` writes ` name="value"` with the value escaped. A name must match `[a-zA-Z][a-zA-Z0-9_:.-]*`. Without `allow_dangerous_html`, names starting with `on`, and `style`, `srcdoc` and similar, are left out. URL attributes (`href`, `src`, `action`, `formaction`, `poster`, `cite`, and others) go through the protocol check of `url`.
-  - `HtmlWriter::raw(value)` writes markup only with `allow_dangerous_html`, and otherwise escapes it, as raw HTML in markdown is.
-- Alternatives: an allowlist of attribute names, safer but stricter; keeping `tag(&str)` and documenting it, as micromark's `this.tag` is.
+  - `HtmlWriter::attr(name, value)` writes ` name="value"`, with the value escaped and URL attributes (`href`, `src`, `cite`) checked as `url` checks them. Without `allow_dangerous_html`, it writes only an allowlist, as `hast-util-sanitize` does: `id`, `class`, `title`, `lang`, `dir`, `role`, `alt`, `width`, `height`, `start`, `reversed`, `open`, `colspan`, `rowspan`, `href`, `src`, `cite`, `aria-*`, and `data-*` of letters, digits, and `-`, but not `data-bind`, `data-hx-*`, or `data-ng-*`. With it, any name of letters, digits, `_`, `:`, `.`, and `-`.
+  - `HtmlWriter::raw(value)` writes HTML from input as `to_html` writes raw HTML: escaped without `allow_dangerous_html`, filtered with `gfm_tagfilter`.
+  - `resume` returns an `Html` that only `to_html` makes, which `HtmlWriter::html` writes back; in the `alt` of an image, it leaves out `Html` written where markup was.
+  - `Url::Src` takes the safe protocols of images; a new `Url::Image`, for an `<img>`, also allows any protocol with `allow_any_img_src`.
+- The security review (by a reviewer who did not write the change) found, before these: framework attributes that run code (`x-on:click`, `hx-on:*`, `v-on:*`, `ng-click`, `data-bind`) and SVG `to`/`values`/`from` through the first deny list; `javascript:` in `src` on any element with `allow_any_img_src`; `raw` skipping `gfm_tagfilter`; `Html` breaking out of an `alt`; and `resume` able to end a buffer of `to_html`. Each is fixed, with a test from its reproduction. The developer chose the allowlist and `Url::Image`.
+- Residual: an allowlisted attribute can matter on an element the construct picks, such as `id` clobbering a global; documented.
+- Alternatives: a deny list (the first version, which the review broke); keeping `tag(&str)`, as micromark's `this.tag`.
 
 ### D72. Testing helpers
 
