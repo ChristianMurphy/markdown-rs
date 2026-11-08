@@ -442,7 +442,7 @@ The pieces follow.
 - Every example is a doctest. Recipe 11 runs with and without `test-util`, and recipes 7, 8, and 11 pass with `test-util`, so they break no rule.
 - Differences from D58:
   - Recipe 2 needs no `previous` check for `\{{`: the escape leaves one `{`, which cannot open (D69).
-  - Recipe 4 skips backtick runs with an attempt, as D61 says. A run that fails has a size no later run has, so few fail within 999 bytes. On `:x[` repeated, time doubles when input doubles, and is about 1.4 seconds for 48 KB in a release build; the recipe says the cap is also the cost.
+  - Recipe 4 skips backtick runs with an attempt, as D61 says. A run that fails has a size no later run has, so few fail within 999 bytes. On `:x[` repeated, time doubles when input doubles, and is about 1.4 seconds for 48 KB in a release build (1.3 after round 2); the recipe says the cap is also the cost.
   - Recipe 10 turns an image alone in its paragraph into a `<figure>`: a transform works the same on a construct's node, matched by its `name`.
 
 ### Round 2: goals and measures
